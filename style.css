@@ -1,0 +1,256 @@
+/* --- CSS 變數與重置 --- */
+:root {
+    --bg-color: #e0e5ec;
+    --text-color: #4a4a4a;
+    --accent-color: #ff6b6b;
+    --success-color: #1dd1a1;
+    --outer-shadow: 9px 9px 16px rgb(163,177,198,0.6), -9px -9px 16px rgba(255,255,255, 0.5);
+    --inner-shadow: inset 6px 6px 10px 0 rgba(163,177,198, 0.7), inset -6px -6px 10px 0 rgba(255,255,255, 0.8);
+    --small-outer: 3px 3px 6px rgb(163,177,198,0.6), -3px -3px 6px rgba(255,255,255, 0.5);
+}
+
+* { box-sizing: border-box; user-select: none; outline: none; }
+
+body {
+    margin: 0;
+    font-family: 'Helvetica Neue', Arial, sans-serif;
+    background-color: var(--bg-color);
+    color: var(--text-color);
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* --- 說明按鈕 & Modal --- */
+.help-fab {
+    position: fixed; top: 20px; right: 20px; width: 40px; height: 40px;
+    border-radius: 50%; background: var(--bg-color); box-shadow: var(--outer-shadow);
+    border: none; color: var(--text-color); font-weight: bold; font-size: 1.2rem;
+    cursor: pointer; z-index: 100; transition: transform 0.2s;
+    display: flex; align-items: center; justify-content: center;
+}
+.help-fab:active { box-shadow: var(--inner-shadow); transform: scale(0.95); }
+.float-fab { right: 72px; font-weight: normal; }
+
+/* --- 懸浮小視窗（Document PiP） --- */
+.mini-body { display: flex; align-items: center; justify-content: center; }
+.mini { text-align: center; width: 100%; padding: 0 12px; }
+.mini-top { display: flex; justify-content: center; gap: 6px; font-size: 0.85rem; color: #888; }
+.mini-mode { color: var(--accent-color); font-weight: bold; flex-shrink: 0; }
+.mini-task { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mini-time { font-size: 3.4rem; font-weight: 200; font-variant-numeric: tabular-nums; line-height: 1.2; }
+.mini-controls { display: flex; justify-content: center; gap: 12px; margin-top: 6px; }
+.mini-btn {
+    padding: 6px 18px; border: none; border-radius: 20px; font-size: 0.9rem; cursor: pointer;
+    background: var(--bg-color); color: var(--text-color); box-shadow: var(--small-outer);
+}
+.mini-btn:first-child { color: var(--accent-color); font-weight: bold; }
+.mini-btn:active { box-shadow: var(--inner-shadow); }
+
+/* --- 懸浮時間（影片子母畫面）面板 --- */
+.video-pip-panel { position: fixed; left: -9999px; top: 0; width: 280px; } /* 預設藏在畫面外，影片仍可播放 */
+.video-pip-panel.show {
+    left: auto; top: auto; right: 20px; bottom: 20px; z-index: 150;
+    background: var(--bg-color); box-shadow: var(--outer-shadow); border-radius: 20px; padding: 36px 16px 16px;
+}
+.video-pip-panel .modal-close { top: 6px; right: 12px; }
+.video-pip-panel video { width: 100%; display: block; border-radius: 10px; }
+.vp-hint { font-size: 0.8rem; color: #666; line-height: 1.5; margin-bottom: 10px; }
+
+.modal-overlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(224, 229, 236, 0.8); backdrop-filter: blur(5px); z-index: 200;
+    justify-content: center; align-items: center; opacity: 0; transition: opacity 0.3s;
+}
+.modal-overlay.show { display: flex; opacity: 1; }
+
+.modal-content {
+    background: var(--bg-color); padding: 40px; border-radius: 30px;
+    box-shadow: var(--outer-shadow); width: 90%; max-width: 500px;
+    position: relative; max-height: 85vh; overflow-y: auto;
+}
+.modal-close { position: absolute; top: 20px; right: 20px; border: none; background: transparent; font-size: 1.5rem; cursor: pointer; color: #999; }
+.modal-section { margin-bottom: 30px; }
+.modal-title { font-size: 1.2rem; font-weight: bold; margin-bottom: 10px; color: var(--accent-color); border-bottom: 2px solid #eee; padding-bottom: 5px;}
+.modal-list { padding-left: 20px; font-size: 0.9rem; color: #666; line-height: 1.6; }
+.data-actions { display: flex; gap: 15px; margin-top: 15px; }
+.action-btn {
+    flex: 1; padding: 10px; border: none; border-radius: 15px; background: var(--bg-color);
+    box-shadow: var(--small-outer); cursor: pointer; font-size: 0.9rem; color: #555;
+    display: flex; align-items: center; justify-content: center; gap: 5px;
+}
+.action-btn:active { box-shadow: var(--inner-shadow); transform: translateY(1px); }
+.action-btn.export { color: var(--success-color); }
+
+/* 時間記錄 */
+.log-nav { display: flex; align-items: center; gap: 8px; padding-right: 30px; }
+.log-nav-btn {
+    width: 28px; height: 28px; border-radius: 50%; border: none; flex-shrink: 0;
+    background: var(--bg-color); box-shadow: var(--small-outer);
+    color: var(--accent-color); font-size: 1.1rem; cursor: pointer;
+}
+.log-nav-btn:active { box-shadow: var(--inner-shadow); }
+.log-nav-btn:disabled { opacity: 0.3; cursor: default; box-shadow: none; }
+.log-summary { font-size: 0.95rem; margin-bottom: 8px; }
+.log-pending { font-size: 0.8rem; color: #999; margin-bottom: 8px; }
+.log-table-wrap { max-height: 40vh; overflow-y: auto; margin: 10px 0; }
+.log-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.log-table th, .log-table td { padding: 6px 4px; text-align: left; border-bottom: 1px solid rgba(163,177,198, 0.4); }
+.log-table th { color: #999; font-weight: normal; position: sticky; top: 0; background: var(--bg-color); }
+.log-table tr.interrupted td { color: #aaa; }
+.log-footer { margin-top: 15px; font-size: 0.75rem; color: #999; line-height: 1.6; }
+.log-clear { color: #e17055; cursor: pointer; margin-left: 6px; text-decoration: underline; }
+
+/* --- 主要佈局 --- */
+.app-container {
+    display: grid; height: 100%; grid-template-columns: 1fr 140px 1fr; 
+    gap: 20px; padding: 40px;
+}
+
+/* --- 左側：計時器 --- */
+body[data-mode="short"] { --accent-color: var(--success-color); }
+body[data-mode="long"] { --accent-color: #54a0ff; }
+
+.timer-zone { display: flex; flex-direction: column; justify-content: center; align-items: center; }
+.mode-row { display: flex; gap: 10px; margin-bottom: 20px; }
+.mode-btn {
+    padding: 8px 16px; border-radius: 20px; border: none;
+    background: var(--bg-color); box-shadow: var(--small-outer);
+    color: #888; font-size: 0.85rem; cursor: pointer;
+}
+.mode-btn.active { box-shadow: var(--inner-shadow); color: var(--accent-color); font-weight: bold; }
+.count-row { display: flex; gap: 4px; margin-bottom: 20px; padding: 4px; border-radius: 20px; box-shadow: var(--inner-shadow); }
+.count-btn { padding: 4px 14px; border: none; border-radius: 16px; background: transparent; color: #999; font-size: 0.8rem; cursor: pointer; }
+.count-btn.active { background: var(--bg-color); box-shadow: var(--small-outer); color: var(--accent-color); font-weight: bold; }
+/* 正數沒有目標時長：保留位置但隱藏預設按鈕 */
+body[data-count="up"] .preset-row { visibility: hidden; }
+body[data-count="up"] .timer-display { cursor: default; }
+.current-task {
+    font-size: 0.95rem; color: #666; margin-bottom: 12px; max-width: 90%;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cycle-info { display: flex; align-items: center; gap: 12px; margin-bottom: 25px; font-size: 0.9rem; color: #888; }
+.cycle-dots { display: flex; gap: 6px; }
+.dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    box-shadow: inset 2px 2px 4px rgba(163,177,198, 0.7), inset -2px -2px 4px rgba(255,255,255, 0.8);
+}
+.dot.filled { background: #ff6b6b; box-shadow: none; }
+.preset-row { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; justify-content: center; }
+.preset-btn {
+    width: 40px; height: 40px; border-radius: 50%; border: none;
+    background: var(--bg-color); box-shadow: var(--outer-shadow);
+    color: #777; font-size: 0.8rem; cursor: pointer; transition: transform 0.1s;
+}
+.preset-btn:active { box-shadow: var(--inner-shadow); transform: scale(0.95); }
+
+.timer-display {
+    font-size: 15vw; font-weight: 200; color: var(--text-color);
+    font-variant-numeric: tabular-nums; text-shadow: var(--outer-shadow);
+    margin-bottom: 20px; cursor: text; border-bottom: 2px solid transparent;
+}
+.timer-display:focus { border-bottom: 2px solid var(--accent-color); }
+.controls { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; }
+button.main-btn {
+    padding: 15px 32px; font-size: 1.2rem; border: none; border-radius: 50px;
+    background: var(--bg-color); color: var(--text-color); box-shadow: var(--outer-shadow);
+    cursor: pointer; transition: all 0.2s ease;
+}
+button.main-btn:active { box-shadow: var(--inner-shadow); transform: translateY(2px); }
+button.btn-primary { color: var(--accent-color); font-weight: bold; }
+
+/* --- 中間：排程 --- */
+.groove-wrapper { display: flex; flex-direction: column; align-items: center; height: 100%; }
+.groove-header { margin-bottom: 10px; font-size: 0.9rem; opacity: 0.6; }
+.groove-track {
+    width: 100%; height: 100%; border-radius: 70px;
+    background-color: var(--bg-color); box-shadow: var(--inner-shadow);
+    padding: 20px 10px; display: flex; flex-direction: column; align-items: center;
+    gap: 15px; overflow-y: auto; transition: background 0.3s;
+}
+.groove-track.drag-over { background-color: rgba(0,0,0,0.02); }
+.groove-actions { display: flex; justify-content: center; gap: 4px; margin-top: 15px; }
+.clear-btn { font-size: 0.8rem; padding: 10px 6px; opacity: 0.6; border: none; background: transparent; cursor: pointer; color: var(--text-color); white-space: nowrap; }
+.clear-btn.log-btn { opacity: 0.9; color: var(--accent-color); }
+
+/* 凹槽第一張 = 目前任務 */
+.groove-track .task-card:first-child:not(.drop-placeholder) { box-shadow: var(--small-outer), 0 0 0 2px var(--accent-color); }
+
+/* --- 右側：動態任務庫 --- */
+.task-palette { display: flex; flex-direction: column; padding: 20px; overflow-y: auto; padding-right: 10px; }
+.task-palette::-webkit-scrollbar { width: 6px; }
+.task-palette::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+.palette-header {
+    font-size: 1.5rem; font-weight: 300; margin-bottom: 20px;
+    text-align: center; display: flex; justify-content: center; align-items: center; gap: 10px;
+}
+.reset-all-icon { font-size: 0.8rem; opacity: 0.3; cursor: pointer; }
+.reset-all-icon:hover { opacity: 1; color: red; }
+
+.category-group {
+    margin-bottom: 30px; animation: fadeIn 0.3s ease; position: relative;
+    border-radius: 10px; transition: transform 0.2s, box-shadow 0.2s;
+}
+.category-group.sort-dragging { opacity: 0.5; border: 2px dashed #999; }
+.category-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; padding: 5px; position: relative; }
+.category-title { font-size: 1.1rem; color: #555; cursor: text; border-bottom: 1px dashed transparent; padding: 2px 5px; flex-grow: 1; margin-right: 10px; }
+.category-title:focus { border-bottom: 1px dashed #999; background: rgba(255,255,255,0.3); }
+.cat-controls { display: flex; align-items: center; gap: 10px; }
+.add-task-btn {
+    width: 24px; height: 24px; border-radius: 50%; border: none;
+    background: var(--bg-color); box-shadow: var(--small-outer); color: var(--accent-color);
+    font-weight: bold; cursor: pointer; display: flex; align-items: center; justify-content: center;
+}
+.add-task-btn:active { box-shadow: var(--inner-shadow); }
+.drag-handle { touch-action: none; cursor: grab; color: #aaa; font-size: 1.2rem; display: flex; align-items: center; justify-content: center; padding: 5px; }
+.drag-handle:active { cursor: grabbing; color: #666; }
+.del-category-btn { position: absolute; right: 0; top: -20px; font-size: 10px; color: #aaa; cursor: pointer; opacity: 0; transition: opacity 0.2s; }
+.category-group:hover .del-category-btn { opacity: 1; }
+
+.task-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 15px; }
+.task-card {
+    width: 80px; height: 80px; border-radius: 20px; background: var(--bg-color);
+    box-shadow: var(--small-outer); display: flex; flex-direction: column;
+    justify-content: center; align-items: center; cursor: grab; font-size: 0.8rem;
+    font-weight: bold; color: #666; transition: transform 0.2s; position: relative;
+    flex-shrink: 0; -webkit-touch-callout: none;
+}
+.task-card:hover { transform: translateY(-2px); }
+.task-card:active { cursor: grabbing; }
+.task-name { pointer-events: none; max-width: 90%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tag { width: 8px; height: 8px; border-radius: 50%; margin-bottom: 8px; pointer-events: none; }
+.delete-icon { display: none; position: absolute; top: 2px; right: 5px; font-size: 14px; color: #999; cursor: pointer; }
+
+.groove-track .task-card .delete-icon { display: block; }
+
+/* 拖曳中 */
+.is-dragging, .is-dragging * { cursor: grabbing !important; }
+.drag-ghost {
+    position: fixed; left: 0; top: 0; z-index: 1000; margin: 0;
+    pointer-events: none; opacity: 0.9; transition: none; box-shadow: var(--outer-shadow);
+}
+.task-card.drag-source { opacity: 0.35; }
+.task-card.drop-placeholder { box-shadow: var(--inner-shadow); border: 2px dashed #bbb; background: transparent; }
+.groove-track .task-card .task-name { pointer-events: none; }
+
+.add-category-main-btn {
+    width: 100%; padding: 10px; margin-top: 10px; border: 2px dashed #ccc;
+    border-radius: 15px; background: transparent; color: #888; cursor: pointer; margin-bottom: 40px;
+}
+.add-category-main-btn:hover { border-color: var(--accent-color); color: var(--accent-color); }
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+/* 刪除動畫 */
+@keyframes poof { 0% { transform: scale(1); opacity: 1; } 100% { transform: scale(0); opacity: 0; } }
+
+/* 觸控裝置沒有 hover，刪除類別按鈕要一直顯示 */
+@media (hover: none) {
+    .del-category-btn { opacity: 1; }
+}
+
+@media (max-width: 768px) {
+    body { overflow: auto; }
+    .app-container { height: auto; grid-template-columns: 1fr; grid-template-rows: auto 400px auto; gap: 30px; }
+    .task-palette { overflow-y: visible; }
+    .timer-display { font-size: 20vw; }
+    .groove-track { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; align-content: flex-start;}
+}
