@@ -46,6 +46,7 @@
                 <li><strong>目前任務：</strong>凹槽最上面的任務就是目前任務（以按下開始時為準）。要換任務，把它拖到最上面。</li>
                 <li><strong>今日記錄：</strong>每段專注與休息結束後會自動記錄時間、任務與實際時長（中途結束的標示「中斷」）。按凹槽下方「時間記錄」查看，用 ‹ › 切換到過去有記錄的日子；可匯出當天的 CSV（試算表）或 Markdown（筆記），或一次匯出全部 30 天的 CSV。</li>
                 <li><strong>懸浮小視窗：</strong>按右上角 ⧉。Chrome／Edge 會開出可操作的置頂小視窗；Firefox 會在右下角出現預覽畫面，再按畫面上的「子母畫面」按鈕（或 Ctrl+Shift+]）讓時間浮在最上層（只能看，不能按）。</li>
+                <li><strong>雲端同步：</strong>按右上角 ☁ 用 Google 登入，手機與電腦登入同一帳號就會自動同步任務庫、行程、記錄與設定。</li>
                 <li><strong>編輯任務：</strong>點一下任務改名，名稱清空即刪除（電腦也可按右鍵刪除）。</li>
             </ul>
         </div>
@@ -81,7 +82,7 @@
                 <button class="action-btn" onclick="exportAllLogs()">⬇ 匯出全部 30 天（CSV）</button>
             </div>
             <div class="log-footer">
-                記錄保留最近 30 天，只存在這台裝置的瀏覽器中。
+                記錄保留最近 30 天，存在這台裝置的瀏覽器中；登入雲端同步後也會同步到其他裝置。
                 <span class="log-clear" onclick="clearLogs()">清除所有記錄</span>
             </div>
         </div>
