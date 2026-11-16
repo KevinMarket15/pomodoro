@@ -440,10 +440,10 @@ function refreshScheduleTimes() {
         if (!el) return;
         const s = stats[card.querySelector('.task-name').innerText] || { sec: 0, pomo: 0 };
         const est = card.dataset.est ? cleanEst(card.dataset.est) : 0;
-        const parts = [];
-        if (est) parts.push(`${s.pomo}/${est}🍅`);
-        if (s.sec >= 60) parts.push(`${Math.round(s.sec / 60)}分`);
-        el.textContent = parts.join(' ');
+        // 有預估顆數時顯示「已完成／預估」，已花的分鐘數放在滑鼠提示裡（卡片下排要留位置給 −／＋）
+        const minutes = s.sec >= 60 ? `${Math.round(s.sec / 60)}分` : '';
+        el.textContent = est ? `${s.pomo}/${est}🍅` : minutes;
+        card.title = minutes ? `今天已專注 ${minutes}鐘` : '';
         if (est && !card.classList.contains('done')) remaining += Math.max(0, est - s.pomo);
     });
 
@@ -859,7 +859,12 @@ function createTaskDOM(container, name, color, meta) {
     // 點卡片 = 排入行程；改名和刪除走右上角的 ✎
     card.onclick = () => {
         if (card.querySelector('input')) return;
-        addToSchedule(card.querySelector('.task-name').innerText, card.dataset.color, true, null, cleanEst(card.dataset.est));
+        const taskName = card.querySelector('.task-name').innerText;
+        // 行程裡已經有這個任務（還沒完成）：不另外加一張，直接多排一顆
+        const existing = [...slot.querySelectorAll('.task-card:not(.done):not(.drop-placeholder)')]
+            .find(c => c.querySelector('.task-name').innerText === taskName);
+        if (existing) { playTone('drop'); changeCardEst(existing, 1); }
+        else addToSchedule(taskName, card.dataset.color, true, null, cleanEst(card.dataset.est));
         card.classList.remove('added'); void card.offsetWidth; card.classList.add('added');
     };
     card.oncontextmenu = (e) => { e.preventDefault(); removePaletteTask(card); };
@@ -1031,7 +1036,7 @@ document.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         drag = { ...base, type: 'category', el: handle.closest('.category-group') };
         activateDrag(); // ☰ 是專用把手，按下就開始
-    } else if (card && !e.target.closest('.delete-icon, .done-icon, .edit-icon, input')) {
+    } else if (card && !e.target.closest('.delete-icon, .done-icon, .edit-icon, .est-btn, input')) {
         drag = { ...base, type: 'task', el: card, origin: slot.contains(card) ? 'groove' : 'palette' };
         if (e.pointerType === 'touch') drag.pressTimer = setTimeout(activateDrag, LONG_PRESS_MS);
     }
@@ -1231,9 +1236,26 @@ function appendScheduleCard(name, color, before = null, doneAt = null, est = nul
     const text = document.createElement('div'); text.className = 'task-name'; text.innerText = name;
     const time = document.createElement('div'); time.className = 'task-time';
 
+    // 左下、右下的 −／＋：調整這個任務要做幾顆蕃茄
+    const minus = document.createElement('span');
+    minus.textContent = '−'; minus.className = 'est-btn est-minus'; minus.title = '少排一顆';
+    minus.onclick = () => { playTone('click'); changeCardEst(div, -1); };
+    const plus = document.createElement('span');
+    plus.textContent = '＋'; plus.className = 'est-btn est-plus'; plus.title = '多排一顆';
+    plus.onclick = () => { playTone('click'); changeCardEst(div, 1); };
+
     div.appendChild(delBtn); div.appendChild(doneBtn); div.appendChild(tag); div.appendChild(text); div.appendChild(time);
+    div.appendChild(minus); div.appendChild(plus);
     slot.insertBefore(div, before);
     return div;
+}
+
+// 調整行程卡片的預估蕃茄數（1–12）
+function changeCardEst(card, delta) {
+    const current = card.dataset.est ? cleanEst(card.dataset.est) : 1;
+    card.dataset.est = Math.min(12, Math.max(1, current + delta));
+    card.classList.remove('added'); void card.offsetWidth; card.classList.add('added');
+    saveSchedule(); // 會一併更新卡片上的顆數與預計完成時間
 }
 
 // 完成的任務劃掉並移到最下面；再按一次取消，回到未完成的最後
@@ -1766,8 +1788,11 @@ function applyAiPlan(replace) {
         items.forEach(item => {
             const known = library[item.name];
             if (!known) unknown++;
-            appendScheduleCard(item.name, known ? known.color : '#999999', slot.querySelector('.task-card.done'), null,
-                item.est ? cleanEst(item.est) : (known ? known.est : 1));
+            const est = item.est ? cleanEst(item.est) : (known ? known.est : 1);
+            // 和手動操作一致：行程裡已經有同一個任務（還沒完成）就把顆數加上去，不另外多一張
+            const existing = [...slot.querySelectorAll('.task-card:not(.done)')].find(c => c.querySelector('.task-name').innerText === item.name);
+            if (existing) existing.dataset.est = Math.min(12, (existing.dataset.est ? cleanEst(existing.dataset.est) : 1) + est);
+            else appendScheduleCard(item.name, known ? known.color : '#999999', slot.querySelector('.task-card.done'), null, est);
         });
         saveSchedule();
     });

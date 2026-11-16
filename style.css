@@ -405,3 +405,14 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
     border-radius: 12px; box-shadow: var(--inner-shadow); color: var(--muted); font-size: 0.75rem; line-height: 1.5;
     user-select: text; -webkit-user-select: text;
 }
+
+/* --- 行程卡片下排的 −／＋（調整顆數） --- */
+.est-btn {
+    display: none; position: absolute; bottom: 0; width: 24px; height: 24px; line-height: 24px; text-align: center;
+    font-size: 13px; color: var(--faint); cursor: pointer; border-radius: 50%;
+}
+.est-minus { left: 0; }
+.est-plus { right: 0; }
+.groove-track .task-card .est-btn { display: block; }
+.groove-track .task-card.done .est-btn { display: none; }
+.est-btn:hover { color: var(--accent-color); }
