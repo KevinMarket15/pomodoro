@@ -30,6 +30,15 @@ body {
 }
 .help-fab:active { box-shadow: var(--inner-shadow); transform: scale(0.95); }
 .float-fab { right: 72px; font-weight: normal; }
+.sync-fab { right: 124px; font-weight: normal; }
+/* 右下角小圓點表示同步狀態 */
+.sync-dot { position: absolute; right: 6px; bottom: 6px; width: 8px; height: 8px; border-radius: 50%; background: #bbb; }
+.sync-fab[data-state="ok"] .sync-dot { background: var(--success-color); }
+.sync-fab[data-state="syncing"] .sync-dot,
+.sync-fab[data-state="connecting"] .sync-dot,
+.sync-fab[data-state="offline"] .sync-dot { background: #feca57; }
+.sync-fab[data-state="error"] .sync-dot { background: #e17055; }
+.sync-status { white-space: pre-line; font-size: 0.95rem; margin-bottom: 10px; color: var(--text-color); }
 
 /* --- 懸浮小視窗（Document PiP） --- */
 .mini-body { display: flex; align-items: center; justify-content: center; }

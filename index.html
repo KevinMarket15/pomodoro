@@ -10,6 +10,26 @@
 
 <button class="help-fab" onclick="toggleModal(true)">?</button>
 <button class="help-fab float-fab" onclick="openFloating()" title="懸浮小視窗">⧉</button>
+<button class="help-fab sync-fab" id="syncFab" onclick="toggleModal(true, 'syncModal')" title="雲端同步" style="display:none" data-state="off">☁<span class="sync-dot"></span></button>
+
+<div class="modal-overlay" id="syncModal" onclick="toggleModal(false, 'syncModal')">
+    <div class="modal-content" onclick="event.stopPropagation()">
+        <button class="modal-close" onclick="toggleModal(false, 'syncModal')">×</button>
+        <div class="modal-section">
+            <div class="modal-title">雲端同步</div>
+            <div class="sync-status" id="syncStatus">尚未登入</div>
+            <ul class="modal-list">
+                <li>用 Google 帳號登入後，登入同一帳號的手機與電腦會自動同步：任務庫、今日行程、時間記錄、今日蕃茄數與時長設定。</li>
+                <li>正在進行的計時不會同步，各裝置自己計時。</li>
+                <li>離線時照常使用，恢復連線後會自動上傳。</li>
+            </ul>
+            <div class="data-actions">
+                <button class="action-btn export" id="syncSignIn">使用 Google 登入</button>
+                <button class="action-btn" id="syncSignOut" style="display:none">登出</button>
+            </div>
+        </div>
+    </div>
+</div>
 
 <div class="modal-overlay" id="helpModal" onclick="toggleModal(false)">
     <div class="modal-content" onclick="event.stopPropagation()">
@@ -127,5 +147,6 @@
 </main>
 
 <script src="script.js"></script>
+<script type="module" src="sync.js"></script>
 </body>
 </html>

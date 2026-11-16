@@ -60,6 +60,16 @@ const STORAGE_KEY_STATE = 'pomodoro_state_v5'; // 計時狀態，重新整理後
 const STORAGE_KEY_LOG = 'pomodoro_log_v1';     // 時間記錄
 const LOG_KEEP_DAYS = 30;
 
+// 會同步到雲端的資料，一律經過這兩個函式寫入，讓同步模組 (sync.js) 知道有變動
+function storeSet(key, value) {
+    localStorage.setItem(key, value);
+    window.dispatchEvent(new CustomEvent('pomodoro:change', { detail: { key } }));
+}
+function storeRemove(key) {
+    localStorage.removeItem(key);
+    window.dispatchEvent(new CustomEvent('pomodoro:change', { detail: { key } }));
+}
+
 function downloadFile(filename, text, type) {
     const blob = new Blob([text], { type });
     const url = URL.createObjectURL(blob);
@@ -83,17 +93,18 @@ window.importData = function(input) {
     const file = input.files[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = function(e) {
+    reader.onload = async function(e) {
         try {
             const data = JSON.parse(e.target.result);
-            if (data.categories) localStorage.setItem(STORAGE_KEY_CATS, JSON.stringify(data.categories));
-            if (data.schedule) localStorage.setItem(STORAGE_KEY_SCHED, JSON.stringify(data.schedule));
+            if (data.categories) storeSet(STORAGE_KEY_CATS, JSON.stringify(data.categories));
+            if (data.schedule) storeSet(STORAGE_KEY_SCHED, JSON.stringify(data.schedule));
             if (Array.isArray(data.logs)) { // 記錄用合併，避免蓋掉這台裝置自己的記錄
                 const logs = loadLogs();
                 const seen = new Set(logs.map(l => `${l.start}|${l.mode}`));
                 data.logs.forEach(l => { if (!seen.has(`${l.start}|${l.mode}`)) logs.push(l); });
                 saveLogs(logs);
             }
+            if (window.pomodoroSync) await window.pomodoroSync.flush(); // 重新整理前先把匯入的資料傳上雲端
             alert('匯入成功！'); location.reload();
         } catch (err) { alert('檔案錯誤'); }
     };
@@ -126,7 +137,7 @@ function loadTimerSettings() {
     try { return { ...defaults, ...JSON.parse(localStorage.getItem(STORAGE_KEY_TIMER) || '{}') }; }
     catch (err) { return defaults; }
 }
-function saveTimerSettings() { localStorage.setItem(STORAGE_KEY_TIMER, JSON.stringify(timerSettings)); }
+function saveTimerSettings() { storeSet(STORAGE_KEY_TIMER, JSON.stringify(timerSettings)); }
 
 function todayKey() { return new Date().toLocaleDateString('sv'); } // 本地時區的 YYYY-MM-DD
 function getTodayCount() {
@@ -135,7 +146,7 @@ function getTodayCount() {
         return stats.date === todayKey() ? (stats.count || 0) : 0;
     } catch (err) { return 0; }
 }
-function setTodayCount(count) { localStorage.setItem(STORAGE_KEY_STATS, JSON.stringify({ date: todayKey(), count })); }
+function setTodayCount(count) { storeSet(STORAGE_KEY_STATS, JSON.stringify({ date: todayKey(), count })); }
 
 function formatTime(sec) {
     const m = Math.floor(sec / 60).toString().padStart(2, '0');
@@ -432,7 +443,7 @@ function saveCategories() {
         group.querySelectorAll('.task-card').forEach(card => tasks.push(card.querySelector('.task-name').innerText));
         categories.push({ title, color, tasks });
     });
-    localStorage.setItem(STORAGE_KEY_CATS, JSON.stringify(categories));
+    storeSet(STORAGE_KEY_CATS, JSON.stringify(categories));
 }
 
 function saveSchedule() {
@@ -440,7 +451,7 @@ function saveSchedule() {
     document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
         schedule.push({ name: card.querySelector('.task-name').innerText, color: card.querySelector('.tag').style.background });
     });
-    localStorage.setItem(STORAGE_KEY_SCHED, JSON.stringify(schedule));
+    storeSet(STORAGE_KEY_SCHED, JSON.stringify(schedule));
     updateCurrentTask();
 }
 
@@ -449,9 +460,19 @@ const paletteContainer = document.getElementById('paletteContainer');
 const addCatBtn = document.querySelector('.add-category-main-btn');
 
 function initApp() {
+    renderScheduleFromStorage();
+    renderCategoriesFromStorage();
+}
+
+function renderScheduleFromStorage() {
+    document.getElementById('scheduleSlot').innerHTML = '';
     const savedSchedule = localStorage.getItem(STORAGE_KEY_SCHED);
     if (savedSchedule) JSON.parse(savedSchedule).forEach(t => addToSchedule(t.name, t.color, false));
+    updateCurrentTask();
+}
 
+function renderCategoriesFromStorage() {
+    paletteContainer.querySelectorAll('.category-group').forEach(g => g.remove());
     const savedCats = localStorage.getItem(STORAGE_KEY_CATS);
     if (savedCats) {
         JSON.parse(savedCats).forEach(cat => createCategoryDOM(cat.title, cat.color, cat.tasks));
@@ -552,14 +573,16 @@ window.addNewCategory = function() {
     saveCategories();
 };
 
-window.resetToDefault = function() {
-    if(confirm('重置所有資料？')) {
-        localStorage.removeItem(STORAGE_KEY_CATS);
-        localStorage.removeItem(STORAGE_KEY_SCHED);
-        localStorage.removeItem(STORAGE_KEY_STATE);
-        localStorage.removeItem(STORAGE_KEY_LOG);
-        location.reload();
-    }
+window.resetToDefault = async function() {
+    const syncing = window.pomodoroSync && window.pomodoroSync.isSignedIn();
+    if (!confirm(syncing ? '重置所有資料？\n雲端同步的資料也會一併清除，其他裝置會跟著重置。' : '重置所有資料？')) return;
+    // 先清雲端，不然重新整理後又會從雲端同步回來
+    if (syncing) await window.pomodoroSync.resetCloud();
+    localStorage.removeItem(STORAGE_KEY_CATS);
+    localStorage.removeItem(STORAGE_KEY_SCHED);
+    localStorage.removeItem(STORAGE_KEY_STATE);
+    localStorage.removeItem(STORAGE_KEY_LOG);
+    location.reload();
 }
 
 /* --- 5. 拖曳邏輯（Pointer Events：滑鼠、觸控、觸控筆通用） --- */
@@ -785,7 +808,7 @@ function loadLogs() {
 function saveLogs(logs) {
     const cutoff = Date.now() - LOG_KEEP_DAYS * 24 * 60 * 60 * 1000;
     const kept = logs.filter(l => l.start >= cutoff).sort((a, b) => a.start - b.start);
-    localStorage.setItem(STORAGE_KEY_LOG, JSON.stringify(kept));
+    storeSet(STORAGE_KEY_LOG, JSON.stringify(kept));
 }
 
 function addLog(entry) { const logs = loadLogs(); logs.push(entry); saveLogs(logs); }
@@ -948,7 +971,7 @@ window.copyLog = async function() {
 
 window.clearLogs = function() {
     if (!confirm(`清除所有時間記錄（含過去 ${LOG_KEEP_DAYS} 天）？此動作無法復原。`)) return;
-    localStorage.removeItem(STORAGE_KEY_LOG);
+    storeRemove(STORAGE_KEY_LOG);
     playTone('delete');
     renderLogModal();
 };
@@ -1110,5 +1133,35 @@ function drawPipCanvas() {
     ctx.font = `30px ${font}`; ctx.fillStyle = '#888';
     ctx.fillText(isRunning ? '▶ 計時中' : (session ? '⏸ 已暫停' : '等待開始'), W / 2, 315);
 }
+
+/* --- 8. 給同步模組 (sync.js) 用的介面 --- */
+window.pomodoroApp = {
+    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, stats: STORAGE_KEY_STATS, logs: STORAGE_KEY_LOG },
+    loadLogs, saveLogs,
+
+    // 預設類別還沒存過時先存起來，才有東西可以上傳
+    ensureSaved() { if (!localStorage.getItem(STORAGE_KEY_CATS)) saveCategories(); },
+
+    // 雲端的新資料已寫進 localStorage，依種類更新畫面
+    applyRemote(key) {
+        // 正在拖曳或編輯類別名稱時先不重畫，稍後再套用
+        if (drag || paletteContainer.contains(document.activeElement)) {
+            setTimeout(() => this.applyRemote(key), 1000);
+            return;
+        }
+        if (key === STORAGE_KEY_CATS) renderCategoriesFromStorage();
+        else if (key === STORAGE_KEY_SCHED) renderScheduleFromStorage();
+        else if (key === STORAGE_KEY_STATS) updateModeUI();
+        else if (key === STORAGE_KEY_LOG) {
+            if (document.getElementById('logModal').classList.contains('show')) renderLogModal();
+        } else if (key === STORAGE_KEY_TIMER) {
+            const incoming = loadTimerSettings();
+            if (session) incoming.countUp = timerSettings.countUp; // 進行中的這一段不切換倒數／正數
+            Object.assign(timerSettings, incoming);
+            if (!session && !isRunning) { timeLeft = timerSettings[mode]; elapsed = 0; }
+            updateModeUI(); updateDisplay();
+        }
+    }
+};
 
 window.addEventListener('DOMContentLoaded', initApp);
