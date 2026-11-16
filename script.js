@@ -3,7 +3,7 @@ const STORAGE_KEY_PREFS = 'pomodoro_prefs_v1';
 const IS_TOUCH = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
 const prefs = loadPrefs();
 function loadPrefs() {
-    const defaults = { theme: 'auto', volume: 1, statusNotify: IS_TOUCH };
+    const defaults = { theme: 'auto', volume: 1, statusNotify: IS_TOUCH, aiAsks: ['plan', 'review'] };
     try {
         const p = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFS) || '{}');
         return { ...defaults, ...(p && typeof p === 'object' ? p : {}) };
@@ -99,13 +99,25 @@ function cleanColor(v) {
     const m = typeof v === 'string' && v.trim().match(/^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\))(\s|$)/i);
     return m ? m[1] : '#999999';
 }
+// 預估蕃茄數：1–12
+function cleanEst(v) { const n = Math.round(Number(v)); return n >= 1 && n <= 12 ? n : 1; }
+// 類別的 tasks 維持單純的名稱清單（舊版網頁也讀得懂）；
+// 預估蕃茄數與固定任務（repeat：星期幾，0 = 週日）另外放在 meta[任務名稱]
 function cleanCategories(raw) {
     if (!Array.isArray(raw)) return [];
-    return raw.slice(0, 100).filter(c => c && typeof c === 'object').map(c => ({
-        title: cleanText(c.title, 100) || '未命名',
-        color: cleanColor(c.color),
-        tasks: (Array.isArray(c.tasks) ? c.tasks : []).slice(0, 300).map(t => cleanText(t)).filter(Boolean)
-    }));
+    return raw.slice(0, 100).filter(c => c && typeof c === 'object').map(c => {
+        const tasks = (Array.isArray(c.tasks) ? c.tasks : []).slice(0, 300).map(t => cleanText(t)).filter(Boolean);
+        const meta = {};
+        const rawMeta = c.meta && typeof c.meta === 'object' ? c.meta : {};
+        tasks.forEach(name => {
+            const m = Object.prototype.hasOwnProperty.call(rawMeta, name) ? rawMeta[name] : null;
+            if (!m || typeof m !== 'object') return;
+            const est = cleanEst(m.est);
+            const repeat = Array.isArray(m.repeat) ? [...new Set(m.repeat.filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort() : [];
+            if (est !== 1 || repeat.length) meta[name] = { est, repeat };
+        });
+        return { title: cleanText(c.title, 100) || '未命名', color: cleanColor(c.color), tasks, meta };
+    });
 }
 function cleanSchedule(raw) {
     if (!Array.isArray(raw)) return [];
@@ -113,6 +125,7 @@ function cleanSchedule(raw) {
         .map(t => {
             const item = { name: cleanText(t.name), color: cleanColor(t.color) };
             if (t.done) { item.done = true; item.doneAt = Number.isFinite(t.doneAt) ? t.doneAt : Date.now(); }
+            if (t.est != null) item.est = cleanEst(t.est);
             return item;
         });
 }
@@ -400,28 +413,50 @@ function updateCurrentTask() {
     updateFloating();
 }
 
-// 今天各任務已經專注的秒數（含正在進行的這一段）
-function todayTaskSeconds() {
+// 今天各任務的專注秒數（含正在進行的這一段）與完成的蕃茄數
+function todayTaskStats() {
     const today = todayKey();
     const map = {};
+    const get = name => map[name] || (map[name] = { sec: 0, pomo: 0 });
     loadLogs().forEach(l => {
-        if (l.mode === 'focus' && l.task && dateKey(l.start) === today) map[l.task] = (map[l.task] || 0) + l.actualSec;
+        if (l.mode !== 'focus' || !l.task) return;
+        if (dateKey(l.start) === today) get(l.task).sec += l.actualSec;
+        if (dateKey(l.end) === today) get(l.task).pomo += pomodorosOf(l);
     });
     if (session && session.mode === 'focus' && session.task) {
         const live = session.activeMs + (isRunning ? Date.now() - session.segStart : 0);
-        map[session.task] = (map[session.task] || 0) + Math.round(live / 1000);
+        get(session.task).sec += Math.round(live / 1000);
     }
     return map;
 }
+
+// 更新行程卡片下方的「已完成／預估 🍅、已花時間」，以及行程上方的預計完成時間
 function refreshScheduleTimes() {
     lastTimesRefresh = Date.now();
-    const map = todayTaskSeconds();
+    const stats = todayTaskStats();
+    let remaining = 0;
     document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
         const el = card.querySelector('.task-time');
         if (!el) return;
-        const sec = map[card.querySelector('.task-name').innerText] || 0;
-        el.textContent = sec >= 60 ? `${Math.round(sec / 60)} 分` : '';
+        const s = stats[card.querySelector('.task-name').innerText] || { sec: 0, pomo: 0 };
+        const est = card.dataset.est ? cleanEst(card.dataset.est) : 0;
+        const parts = [];
+        if (est) parts.push(`${s.pomo}/${est}🍅`);
+        if (s.sec >= 60) parts.push(`${Math.round(s.sec / 60)}分`);
+        el.textContent = parts.join(' ');
+        if (est && !card.classList.contains('done')) remaining += Math.max(0, est - s.pomo);
     });
+
+    const planEl = document.getElementById('schedulePlan');
+    if (!remaining) { planEl.textContent = ''; return; }
+    // 剩下的蕃茄之間有 remaining - 1 次休息，其中幾次會輪到長休息
+    const count = getTodayCount(), every = longEvery();
+    const longs = Math.max(0, Math.floor((count + remaining - 1) / every) - Math.floor(count / every));
+    let sec = remaining * timerSettings.focus
+        + Math.max(0, remaining - 1 - longs) * timerSettings.short + longs * timerSettings.long;
+    // 正在進行的這顆已經過的時間不用再算
+    if (session && session.mode === 'focus' && !session.countUp) sec -= Math.max(0, timerSettings.focus - timeLeft);
+    planEl.textContent = `剩 ${remaining} 顆 · 約 ${clockText(Date.now() + Math.max(0, sec) * 1000)} 做完`;
 }
 
 function saveTimerState() {
@@ -653,7 +688,7 @@ document.querySelectorAll('.count-btn').forEach(btn => btn.addEventListener('cli
 }));
 document.addEventListener('visibilitychange', () => {
     tick(); // 切回分頁時立即校正畫面
-    if (!document.hidden) stopAttention();
+    if (!document.hidden) { stopAttention(); checkNewDay(); } // 網頁開著跨過午夜，回來時也算新的一天
     updateWakeLock(); // 分頁到背景時螢幕鎖會被系統收回，回來時重新取得
 });
 window.addEventListener('focus', stopAttention);
@@ -707,8 +742,14 @@ function saveCategories() {
         const title = group.querySelector('.category-title').innerText;
         const color = group.dataset.color;
         const tasks = [];
-        group.querySelectorAll('.task-card').forEach(card => tasks.push(card.querySelector('.task-name').innerText));
-        categories.push({ title, color, tasks });
+        const meta = {};
+        group.querySelectorAll('.task-card').forEach(card => {
+            const name = card.querySelector('.task-name').innerText;
+            tasks.push(name);
+            const est = cleanEst(card.dataset.est), repeat = cardRepeat(card);
+            if (est !== 1 || repeat.length) meta[name] = { est, repeat };
+        });
+        categories.push({ title, color, tasks, meta });
     });
     storeSet(STORAGE_KEY_CATS, JSON.stringify(categories));
 }
@@ -718,6 +759,7 @@ function saveSchedule() {
     document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
         const item = { name: card.querySelector('.task-name').innerText, color: card.dataset.color || card.querySelector('.tag').style.background };
         if (card.classList.contains('done')) { item.done = true; item.doneAt = Number(card.dataset.doneAt) || Date.now(); }
+        if (card.dataset.est) item.est = cleanEst(card.dataset.est);
         schedule.push(item);
     });
     storeSet(STORAGE_KEY_SCHED, JSON.stringify(schedule));
@@ -738,7 +780,7 @@ function renderScheduleFromStorage() {
     const items = cleanSchedule(readStoredJSON(STORAGE_KEY_SCHED));
     const today = todayKey();
     const kept = items.filter(t => !(t.done && dateKey(t.doneAt) !== today)); // 前幾天完成的任務清掉
-    kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null));
+    kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null, t.est));
     if (kept.length !== items.length) saveSchedule();
     updateCurrentTask();
 }
@@ -747,7 +789,7 @@ function renderCategoriesFromStorage() {
     paletteContainer.querySelectorAll('.category-group').forEach(g => g.remove());
     const savedCats = readStoredJSON(STORAGE_KEY_CATS);
     if (Array.isArray(savedCats)) {
-        cleanCategories(savedCats).forEach(cat => createCategoryDOM(cat.title, cat.color, cat.tasks));
+        cleanCategories(savedCats).forEach(cat => createCategoryDOM(cat.title, cat.color, cat.tasks, cat.meta));
     } else {
         createCategoryDOM('工作', '#ff6b6b', ['寫代碼']);
         createCategoryDOM('健康', '#1dd1a1', ['喝水']);
@@ -755,7 +797,7 @@ function renderCategoriesFromStorage() {
     paletteContainer.appendChild(addCatBtn);
 }
 
-function createCategoryDOM(titleText, color, tasks = []) {
+function createCategoryDOM(titleText, color, tasks = [], meta = {}) {
     const group = document.createElement('div');
     group.className = 'category-group';
     group.dataset.color = color;
@@ -799,7 +841,7 @@ function createCategoryDOM(titleText, color, tasks = []) {
     const grid = document.createElement('div');
     grid.className = 'task-grid';
 
-    tasks.forEach(taskName => createTaskDOM(grid, taskName, color));
+    tasks.forEach(taskName => createTaskDOM(grid, taskName, color, meta[taskName]));
 
     group.appendChild(header);
     group.appendChild(grid);
@@ -807,29 +849,33 @@ function createCategoryDOM(titleText, color, tasks = []) {
     paletteContainer.insertBefore(group, addCatBtn);
 }
 
-function createTaskDOM(container, name, color) {
+function createTaskDOM(container, name, color, meta) {
     const card = document.createElement('div');
     card.className = 'task-card';
     card.dataset.color = color;
     card.title = '點一下排入今日行程';
+    if (meta) { card.dataset.est = meta.est; card.dataset.repeat = (meta.repeat || []).join(','); }
 
     // 點卡片 = 排入行程；改名和刪除走右上角的 ✎
     card.onclick = () => {
         if (card.querySelector('input')) return;
-        addToSchedule(card.querySelector('.task-name').innerText, card.dataset.color);
+        addToSchedule(card.querySelector('.task-name').innerText, card.dataset.color, true, null, cleanEst(card.dataset.est));
         card.classList.remove('added'); void card.offsetWidth; card.classList.add('added');
     };
     card.oncontextmenu = (e) => { e.preventDefault(); removePaletteTask(card); };
 
     const edit = document.createElement('span');
-    edit.className = 'edit-icon'; edit.textContent = '✎'; edit.title = '改名（清空即刪除）';
+    edit.className = 'edit-icon'; edit.textContent = '✎'; edit.title = '編輯任務';
     edit.onclick = (e) => { e.stopPropagation(); playTone('click'); editTaskName(card); };
 
     const tag = document.createElement('div');
     tag.className = 'tag'; tag.style.background = color;
     const text = document.createElement('div');
     text.className = 'task-name'; text.innerText = name;
-    card.appendChild(edit); card.appendChild(tag); card.appendChild(text);
+    const badge = document.createElement('div');
+    badge.className = 'task-time';
+    card.appendChild(edit); card.appendChild(tag); card.appendChild(text); card.appendChild(badge);
+    updatePaletteBadge(card);
 
     card.style.opacity = 0; container.appendChild(card);
     requestAnimationFrame(() => { card.style.transition = 'opacity 0.3s'; card.style.opacity = 1; });
@@ -841,14 +887,66 @@ function removePaletteTask(card) {
     withUndo(STORAGE_KEY_CATS, `已從任務庫移除「${name}」`, () => { card.remove(); saveCategories(); });
 }
 
-function editTaskName(card) {
-    if (card.querySelector('input')) return;
-    const nameEl = card.querySelector('.task-name');
-    inlineEdit(nameEl, 'task-edit-input', (value) => {
-        if (value === '') removePaletteTask(card);
-        else { nameEl.innerText = value; saveCategories(); }
-    });
+/* 任務編輯視窗：名稱、預估蕃茄數、固定任務（每週哪幾天自動排進行程） */
+const WEEKDAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
+const mondayFirst = (a, b) => ((a + 6) % 7) - ((b + 6) % 7);
+function cardRepeat(card) { return (card.dataset.repeat || '').split(',').filter(Boolean).map(Number); }
+function repeatText(repeat) {
+    if (!repeat.length) return '';
+    return repeat.length === 7 ? '每天' : repeat.slice().sort(mondayFirst).map(d => WEEKDAY_NAMES[d]).join('');
 }
+// 任務庫卡片下方的小字：預估顆數與固定的星期
+function updatePaletteBadge(card) {
+    const est = cleanEst(card.dataset.est);
+    const parts = [];
+    if (est > 1) parts.push(`${est}🍅`);
+    const rt = repeatText(cardRepeat(card));
+    if (rt) parts.push(rt);
+    card.querySelector('.task-time').textContent = parts.join(' ');
+}
+
+let editingCard = null, editorEst = 1, editorRepeat = new Set();
+function renderTaskEditor() {
+    document.getElementById('taskEstValue').textContent = editorEst;
+    document.querySelectorAll('#taskRepeat .seg-btn').forEach(b => b.classList.toggle('active', editorRepeat.has(Number(b.dataset.day))));
+}
+function editTaskName(card) {
+    editingCard = card;
+    editorEst = cleanEst(card.dataset.est);
+    editorRepeat = new Set(cardRepeat(card));
+    const input = document.getElementById('taskEditName');
+    input.value = card.querySelector('.task-name').innerText;
+    renderTaskEditor();
+    toggleModal(true, 'taskModal');
+    input.focus(); input.select();
+}
+function saveTaskEditor() {
+    const card = editingCard;
+    toggleModal(false, 'taskModal');
+    if (!card || !card.isConnected) return;
+    const name = document.getElementById('taskEditName').value.trim();
+    if (name === '') { removePaletteTask(card); return; }
+    card.querySelector('.task-name').innerText = name;
+    card.dataset.est = editorEst;
+    card.dataset.repeat = [...editorRepeat].sort().join(',');
+    updatePaletteBadge(card);
+    saveCategories();
+}
+document.getElementById('taskEstMinus').addEventListener('click', () => { playTone('click'); editorEst = Math.max(1, editorEst - 1); renderTaskEditor(); });
+document.getElementById('taskEstPlus').addEventListener('click', () => { playTone('click'); editorEst = Math.min(12, editorEst + 1); renderTaskEditor(); });
+document.getElementById('taskRepeat').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn'); if (!btn) return;
+    playTone('click');
+    const day = Number(btn.dataset.day);
+    if (editorRepeat.has(day)) editorRepeat.delete(day); else editorRepeat.add(day);
+    renderTaskEditor();
+});
+document.getElementById('taskSave').addEventListener('click', saveTaskEditor);
+document.getElementById('taskEditName').addEventListener('keydown', (e) => { if (e.key === 'Enter') saveTaskEditor(); });
+document.getElementById('taskDelete').addEventListener('click', () => {
+    toggleModal(false, 'taskModal');
+    if (editingCard && editingCard.isConnected) removePaletteTask(editingCard);
+});
 
 // 把一段文字暫時換成輸入框：Enter 或點到別處確定，Esc 取消
 function inlineEdit(el, className, onCommit, initial = el.innerText) {
@@ -1056,7 +1154,7 @@ function endDrag(commit) {
     if (d.origin === 'palette') {
         const before = d.placeholder.nextSibling;
         d.placeholder.remove();
-        if (dropped) addToSchedule(d.el.querySelector('.task-name').innerText, d.el.dataset.color, true, before);
+        if (dropped) addToSchedule(d.el.querySelector('.task-name').innerText, d.el.dataset.color, true, before, cleanEst(d.el.dataset.est));
     } else if (dropped) {
         playTone('drop'); saveSchedule(); // 調整順序
     } else {
@@ -1106,18 +1204,19 @@ function getSlotInsertBefore(x, y, exclude) {
     return null;
 }
 
-function addToSchedule(name, color, sound = true, before = null) {
+function addToSchedule(name, color, sound = true, before = null, est = null) {
     if(sound) playTone('drop');
     // 沒指定位置（點一下加入）就排在還沒完成的任務最後、已完成的前面
-    appendScheduleCard(name, color, before || slot.querySelector('.task-card.done'));
+    appendScheduleCard(name, color, before || slot.querySelector('.task-card.done'), null, est);
     saveSchedule();
 }
 
 // 只建立卡片、不存檔（從儲存的資料重畫時用，避免把剛收到的雲端資料又當成本機修改傳回去）
-function appendScheduleCard(name, color, before = null, doneAt = null) {
+function appendScheduleCard(name, color, before = null, doneAt = null, est = null) {
     const div = document.createElement('div');
     div.className = 'task-card';
     div.dataset.color = color;
+    if (est) div.dataset.est = cleanEst(est);
     if (doneAt) { div.classList.add('done'); div.dataset.doneAt = doneAt; }
 
     const delBtn = document.createElement('span');
@@ -1428,6 +1527,256 @@ function shiftStats(dir) {
     renderStats();
 }
 
+/* --- 今日開始：每天第一次開啟時，處理之前沒做完的任務與今天的固定任務 --- */
+let dayPending = null; // 視窗開著時的候選清單：{ leftovers: [卡片], repeats: [{name, color, est}] }
+
+// 今天的固定任務裡，行程還沒有的
+function dueRepeats() {
+    const dow = new Date().getDay();
+    const inSchedule = new Set([...slot.querySelectorAll('.task-card .task-name')].map(e => e.innerText));
+    const list = [];
+    document.querySelectorAll('.task-palette .task-card').forEach(card => {
+        const name = card.querySelector('.task-name').innerText;
+        if (!cardRepeat(card).includes(dow) || inSchedule.has(name) || list.some(t => t.name === name)) return;
+        list.push({ name, color: card.dataset.color, est: cleanEst(card.dataset.est) });
+    });
+    return list;
+}
+
+function checkRow(text, detail) {
+    const label = document.createElement('label'); label.className = 'check-row';
+    const box = document.createElement('input'); box.type = 'checkbox'; box.checked = true;
+    const span = document.createElement('span'); span.textContent = text;
+    if (detail) { const small = document.createElement('small'); small.textContent = detail; span.appendChild(small); }
+    label.appendChild(box); label.appendChild(span);
+    return label;
+}
+
+// 「今天開始了沒」記在時長設定裡一起同步：手機早上處理過，電腦就不會再問一次
+function markDayStarted() { timerSettings.dayStarted = todayKey(); saveTimerSettings(); }
+
+function checkNewDay() {
+    const today = todayKey();
+    if (timerSettings.dayStarted === today || drag || document.querySelector('.modal-overlay.show')) return;
+    const firstTime = !timerSettings.dayStarted; // 第一次有這個功能：行程裡的不算「之前沒做完」
+    const leftovers = firstTime ? [] : [...slot.querySelectorAll('.task-card:not(.done):not(.drop-placeholder)')];
+    const repeats = dueRepeats();
+    if (!leftovers.length && !repeats.length) { markDayStarted(); return; }
+
+    dayPending = { leftovers, repeats };
+    document.getElementById('dayTitle').textContent = `今日開始（${shortDate(today)} ${weekdayText(today)}）`;
+    const fill = (boxId, listId, rows) => {
+        document.getElementById(boxId).style.display = rows.length ? '' : 'none';
+        const list = document.getElementById(listId);
+        list.innerHTML = '';
+        rows.forEach(r => list.appendChild(r));
+    };
+    fill('dayLeftoverBox', 'dayLeftovers', leftovers.map(card =>
+        checkRow(card.querySelector('.task-name').innerText, card.dataset.est ? `預估 ${cleanEst(card.dataset.est)} 顆` : '')));
+    fill('dayRepeatBox', 'dayRepeats', repeats.map(t => checkRow(t.name, `預估 ${t.est} 顆`)));
+    toggleModal(true, 'dayModal');
+}
+
+function confirmNewDay() {
+    const pending = dayPending;
+    dayPending = null;
+    toggleModal(false, 'dayModal');
+    if (!pending) return;
+    const checks = id => [...document.querySelectorAll(`#${id} input`)].map(i => i.checked);
+    const keep = checks('dayLeftovers'), add = checks('dayRepeats');
+    pending.leftovers.forEach((card, i) => { if (!keep[i] && card.isConnected) card.remove(); });
+    pending.repeats.forEach((t, i) => {
+        if (add[i]) appendScheduleCard(t.name, t.color, slot.querySelector('.task-card.done'), null, t.est);
+    });
+    saveSchedule();
+    markDayStarted();
+}
+document.getElementById('dayConfirm').addEventListener('click', confirmNewDay);
+document.getElementById('dayAskAi').addEventListener('click', () => { confirmNewDay(); openAiModal(); });
+
+/* --- AI 助理：把資料整理成一段文字給 AI，再把 AI 排的行程貼回來 --- */
+const AI_ASK_TEXT = {
+    plan: '**排今天的行程**：根據任務庫、目前行程和最近的記錄，排出我今天接下來要做的任務，以及每個任務幾顆蕃茄，並簡短說明理由。排的量要實際，參考我最近每天實際完成的顆數。',
+    review: '**今日檢討**：總結我今天做了什麼、專注品質如何（中斷多不多），指出一個做得好的地方和一個可以改進的地方，並建議明天的重點。',
+    week: '**每週回顧**：比較最近 7 天和前 7 天，指出時間主要花在哪裡、哪幾天或哪些任務落後，給我 2 到 3 個下週可以調整的具體建議。',
+    month: '**每月回顧**：看最近 30 天的趨勢（哪幾週多、哪幾週少、各任務的比重），指出明顯的模式，給我下個月的建議。'
+};
+
+function focusLogsBetween(from, to) {
+    return loadLogs().filter(l => { if (l.mode !== 'focus') return false; const d = dateKey(l.start); return d >= from && d <= to; });
+}
+// 每天一列的彙總表
+function dailyTable(days) {
+    const logs = focusLogsBetween(days[0], days[days.length - 1]);
+    const lines = ['| 日期 | 專注(分) | 蕃茄 | 中斷次數 |', '|---|---:|---:|---:|'];
+    days.forEach(d => {
+        const day = logs.filter(l => dateKey(l.start) === d);
+        const sec = day.reduce((sum, l) => sum + l.actualSec, 0);
+        const pomo = day.reduce((sum, l) => sum + pomodorosOf(l), 0);
+        lines.push(`| ${d} ${weekdayText(d)} | ${minutesText(sec)} | ${pomo} | ${day.filter(l => !l.completed).length} |`);
+    });
+    return lines;
+}
+function taskTotalLines(from, to) {
+    const byTask = {};
+    focusLogsBetween(from, to).forEach(l => { const k = l.task || '（未指定）'; byTask[k] = (byTask[k] || 0) + l.actualSec; });
+    const entries = Object.entries(byTask).sort((a, b) => b[1] - a[1]);
+    return entries.length ? entries.map(([task, sec]) => `- ${mdCell(task)}：${minutesText(sec)} 分鐘`) : ['- （沒有記錄）'];
+}
+
+function buildAiText(asks, note) {
+    const today = todayKey();
+    const has = k => asks.includes(k);
+    const min = sec => Math.round(sec / 60);
+    const lines = [
+        '你是我的時間管理秘書。以下是我的蕃茄鐘網頁匯出的資料，請根據它回答。',
+        `現在時間：${today} ${weekdayText(today)} ${clockText(Date.now())}`, '',
+        '## 請幫我做這些事', ''
+    ];
+    asks.forEach((k, i) => lines.push(`${i + 1}. ${AI_ASK_TEXT[k]}`));
+    lines.push('', '請用繁體中文回答，簡潔一點。');
+    if (has('plan')) {
+        lines.push('', '行程請放在回覆的最後，用程式碼區塊、一行一個任務，格式如下（我會把它貼回網頁）：', '',
+            '```', '任務名稱 x 蕃茄數', '```', '',
+            '任務庫裡已有的任務，名稱請一字不差；也可以加入新任務。');
+    }
+    if (note) lines.push('', '## 補充說明', '', note);
+
+    lines.push('', '## 計時設定', '',
+        `- 一顆蕃茄＝專注 ${min(timerSettings.focus)} 分鐘，短休息 ${min(timerSettings.short)} 分鐘，長休息 ${min(timerSettings.long)} 分鐘（每 ${longEvery()} 顆一次）`,
+        `- 今天已完成 ${getTodayCount()} 顆`);
+
+    const cats = cleanCategories(readStoredJSON(STORAGE_KEY_CATS) || []);
+    if (has('plan')) {
+        lines.push('', '## 任務庫', '');
+        cats.forEach(c => {
+            const tasks = c.tasks.map(t => {
+                const m = c.meta[t];
+                const extra = [];
+                if (m && m.est > 1) extra.push(`預估 ${m.est} 顆`);
+                if (m && m.repeat.length) extra.push(`固定：${repeatText(m.repeat)}`);
+                return extra.length ? `${t}（${extra.join('，')}）` : t;
+            });
+            lines.push(`- ${mdCell(c.title)}：${tasks.length ? tasks.map(mdCell).join('、') : '（沒有任務）'}`);
+        });
+        if (!cats.length) lines.push('- （空的）');
+    }
+
+    if (has('plan') || has('review')) {
+        const stats = todayTaskStats();
+        const sched = cleanSchedule(readStoredJSON(STORAGE_KEY_SCHED));
+        lines.push('', '## 今日行程', '');
+        sched.forEach((t, i) => {
+            const s = stats[t.name] || { sec: 0, pomo: 0 };
+            const extra = [];
+            if (t.est) extra.push(`預估 ${t.est} 顆`);
+            if (s.pomo || s.sec >= 60) extra.push(`今天已完成 ${s.pomo} 顆、${min(s.sec)} 分鐘`);
+            lines.push(`${i + 1}. [${t.done ? 'x' : ' '}] ${mdCell(t.name)}${extra.length ? `（${extra.join('，')}）` : ''}`);
+        });
+        if (!sched.length) lines.push('（還沒有排任務）');
+
+        const todayLogs = getLogsByDate(today);
+        lines.push('', '## 今日記錄', '');
+        if (todayLogs.length) {
+            lines.push('| 開始 | 結束 | 類型 | 任務 | 實際(分) | 狀態 |', '|---|---|---|---|---:|---|');
+            todayLogs.map(logRow).forEach(r => lines.push(`| ${r.start} | ${r.end} | ${r.type} | ${mdCell(r.task)} | ${r.actual} | ${r.status} |`));
+        } else lines.push('（今天還沒有記錄）');
+    }
+
+    if (has('plan') || has('week')) {
+        const days = Array.from({ length: 7 }, (_, i) => addDays(today, i - 6));
+        lines.push('', '## 最近 7 天', '', ...dailyTable(days), '', '各任務專注時間：', ...taskTotalLines(days[0], today));
+        if (has('week')) {
+            const prev = Array.from({ length: 7 }, (_, i) => addDays(today, i - 13));
+            lines.push('', '## 前 7 天（比較用）', '', ...dailyTable(prev), '', '各任務專注時間：', ...taskTotalLines(prev[0], prev[6]));
+        }
+    }
+    if (has('month')) {
+        const days = Array.from({ length: 30 }, (_, i) => addDays(today, i - 29));
+        lines.push('', '## 最近 30 天', '', ...dailyTable(days), '', '各任務專注時間：', ...taskTotalLines(days[0], today));
+    }
+    return lines.join('\n') + '\n';
+}
+
+function selectedAiAsks() {
+    return [...document.querySelectorAll('#aiAsks input:checked')].map(i => i.value).filter(v => AI_ASK_TEXT[v]);
+}
+function updateAiPreview() {
+    const asks = selectedAiAsks();
+    document.getElementById('aiPreview').textContent = asks.length
+        ? buildAiText(asks, document.getElementById('aiNote').value.trim())
+        : '請至少勾選一項。';
+    document.getElementById('aiCopy').disabled = !asks.length;
+}
+window.openAiModal = function() {
+    const saved = Array.isArray(prefs.aiAsks) ? prefs.aiAsks : [];
+    document.querySelectorAll('#aiAsks input').forEach(i => { i.checked = saved.includes(i.value); });
+    document.getElementById('aiPlanStatus').textContent = '';
+    updateAiPreview();
+    toggleModal(true, 'aiModal');
+};
+document.getElementById('aiAsks').addEventListener('change', () => {
+    prefs.aiAsks = selectedAiAsks(); savePrefs(); // 記住這次勾的，下次打開沿用
+    updateAiPreview();
+});
+document.getElementById('aiNote').addEventListener('input', updateAiPreview);
+document.getElementById('aiCopy').addEventListener('click', async () => {
+    updateAiPreview(); // 用按下當時的最新資料
+    const asks = selectedAiAsks();
+    if (!asks.length) return;
+    const ok = await copyText(buildAiText(asks, document.getElementById('aiNote').value.trim()));
+    playTone('click');
+    const btn = document.getElementById('aiCopy');
+    btn.textContent = ok ? '✓ 已複製，貼到 AI 吧' : '複製失敗，請從預覽手動複製';
+    setTimeout(() => { btn.textContent = '📋 複製'; }, 2500);
+});
+
+// 解析 AI 回覆的行程：一行一個任務，可帶「x 3」「×3」「（3 顆）」「：3」這類顆數
+function parsePlan(text) {
+    const blocks = [...text.matchAll(/```[^\n]*\n([\s\S]*?)```/g)];
+    const body = blocks.length ? blocks[blocks.length - 1][1] : text; // 有程式碼區塊就只看最後一個
+    const items = [];
+    body.split(/\r?\n/).forEach(raw => {
+        let line = raw.trim();
+        if (!line || /^[#|>]/.test(line) || /^[-=*_\s|:]+$/.test(line)) return; // 空行、標題、表格、分隔線
+        line = line.replace(/\*\*/g, '').replace(/^(?:[-*•‧]|\d+\s*[.)、．])\s*/, '').replace(/^\[[ xX✓]?\]\s*/, '').trim();
+        let est = null;
+        const m = line.match(/^(.*?)\s*(?:[x×✕＊*]\s*(\d{1,2})\s*顆?|[（(]\s*(\d{1,2})\s*顆?(?:蕃茄)?\s*[)）]|[:：]\s*(\d{1,2})\s*顆?|\s(\d{1,2})\s*顆(?:蕃茄)?)\s*$/i);
+        if (m && m[1].trim()) { line = m[1].trim(); est = Number(m[2] || m[3] || m[4] || m[5]); }
+        const name = cleanText(line).trim();
+        if (!name || name === '任務名稱 x 蕃茄數' || items.length >= 50) return;
+        items.push({ name, est });
+    });
+    return items;
+}
+
+function applyAiPlan(replace) {
+    const status = document.getElementById('aiPlanStatus');
+    const items = parsePlan(document.getElementById('aiPlan').value);
+    if (!items.length) { status.textContent = '沒有讀到任務。請一行寫一個任務，例如「寫報告 x 3」。'; return; }
+    // 任務庫裡有的任務沿用它的顏色與預估顆數
+    const library = {};
+    document.querySelectorAll('.task-palette .task-card').forEach(card => {
+        const name = card.querySelector('.task-name').innerText;
+        if (!library[name]) library[name] = { color: card.dataset.color, est: cleanEst(card.dataset.est) };
+    });
+    let unknown = 0;
+    withUndo(STORAGE_KEY_SCHED, replace ? `已用 AI 的行程取代（${items.length} 個任務）` : `已排入 AI 的行程（${items.length} 個任務）`, () => {
+        if (replace) slot.querySelectorAll('.task-card:not(.done)').forEach(card => card.remove()); // 已完成的留著
+        items.forEach(item => {
+            const known = library[item.name];
+            if (!known) unknown++;
+            appendScheduleCard(item.name, known ? known.color : '#999999', slot.querySelector('.task-card.done'), null,
+                item.est ? cleanEst(item.est) : (known ? known.est : 1));
+        });
+        saveSchedule();
+    });
+    status.textContent = `已排入 ${items.length} 個任務` + (unknown ? `，其中 ${unknown} 個不在任務庫（灰色）` : '') + '。';
+    document.getElementById('aiPlan').value = '';
+}
+document.getElementById('aiPlanReplace').addEventListener('click', () => applyAiPlan(true));
+document.getElementById('aiPlanAppend').addEventListener('click', () => applyAiPlan(false));
+
 /* --- 設定視窗 --- */
 function renderSettings() {
     document.querySelectorAll('#setTheme .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.value === prefs.theme));
@@ -1498,19 +1847,24 @@ window.exportAllLogs = function() {
     downloadFile(`pomodoro_log_${from}_${to}.csv`, buildCSV(logs), 'text/csv;charset=utf-8');
 };
 
-window.copyLog = async function() {
-    const logs = getLogsByDate(logViewDate);
-    if (!logs.length) { alert('這天沒有記錄'); return; }
-    const text = buildMarkdown(logs, logViewDate);
-    let ok = false;
-    try { await navigator.clipboard.writeText(text); ok = true; }
+async function copyText(text) {
+    try { await navigator.clipboard.writeText(text); return true; }
     catch (err) { // 部分環境（例如直接開本機檔案）不支援 Clipboard API，改用舊方法
         const ta = document.createElement('textarea');
         ta.value = text; ta.style.cssText = 'position:fixed;opacity:0;user-select:text;';
         document.body.appendChild(ta); ta.select();
+        let ok = false;
         try { ok = document.execCommand('copy'); } catch (e) {}
         ta.remove();
+        return ok;
     }
+}
+
+window.copyLog = async function() {
+    const logs = getLogsByDate(logViewDate);
+    if (!logs.length) { alert('這天沒有記錄'); return; }
+    const text = buildMarkdown(logs, logViewDate);
+    const ok = await copyText(text);
     playTone('click');
     const btn = document.getElementById('copyLogBtn');
     btn.textContent = ok ? '✓ 已複製' : '複製失敗';
@@ -1730,7 +2084,7 @@ window.pomodoroApp = {
     // 雲端的新資料已寫進 localStorage，依種類更新畫面
     applyRemote(key) {
         // 正在拖曳或編輯類別名稱時先不重畫，稍後再套用
-        if (drag || paletteContainer.contains(document.activeElement)) {
+        if (drag || paletteContainer.contains(document.activeElement) || document.getElementById('taskModal').classList.contains('show')) {
             setTimeout(() => this.applyRemote(key), 1000);
             return;
         }
@@ -1745,6 +2099,8 @@ window.pomodoroApp = {
             Object.assign(timerSettings, incoming);
             if (!session && !isRunning) { timeLeft = timerSettings[mode]; elapsed = 0; }
             updateModeUI(); updateDisplay(); renderSettings();
+            // 別台裝置已經處理過「今日開始」：這裡還開著的話就收掉
+            if (dayPending && timerSettings.dayStarted === todayKey()) { dayPending = null; toggleModal(false, 'dayModal'); }
         }
     }
 };
@@ -1755,6 +2111,7 @@ const ACTIONS = {
     'open-help': () => toggleModal(true),
     'open-settings': () => { renderSettings(); toggleModal(true, 'settingsModal'); },
     'open-stats': () => openStatsModal(),
+    'open-ai': () => openAiModal(),
     'stats-prev': () => shiftStats(-1),
     'stats-next': () => shiftStats(1),
     'open-sync': () => toggleModal(true, 'syncModal'),
@@ -1790,8 +2147,13 @@ document.addEventListener('click', (e) => {
 // 點視窗外面或右上角 × 關閉
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
     overlay.addEventListener('click', (e) => {
-        if (e.target === overlay || e.target.closest('.modal-close')) toggleModal(false, overlay.id);
+        if (e.target !== overlay && !e.target.closest('.modal-close')) return;
+        if (overlay.id === 'dayModal') confirmNewDay(); // 點外面關掉＝照目前勾選的開始今天
+        else toggleModal(false, overlay.id);
     });
 });
 
-window.addEventListener('DOMContentLoaded', initApp);
+window.addEventListener('DOMContentLoaded', () => {
+    initApp();
+    setTimeout(checkNewDay, 2500); // 稍等一下，讓雲端同步先把別台裝置的最新狀態帶進來
+});

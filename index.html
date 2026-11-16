@@ -24,6 +24,7 @@
         <button class="help-fab" data-action="open-help" title="使用說明"><span class="fab-icon">?</span><span class="fab-label">使用說明</span></button>
         <button class="help-fab" data-action="open-settings" title="設定"><span class="fab-icon">⚙</span><span class="fab-label">設定</span></button>
         <button class="help-fab" data-action="open-stats" title="每週統計"><span class="fab-icon">📊</span><span class="fab-label">每週統計</span></button>
+        <button class="help-fab" data-action="open-ai" title="AI 助理"><span class="fab-icon">🤖</span><span class="fab-label">AI 助理</span></button>
         <button class="help-fab float-fab" data-action="open-float" title="懸浮小視窗"><span class="fab-icon">⧉</span><span class="fab-label">懸浮小視窗</span></button>
         <button class="help-fab sync-fab" id="syncFab" data-action="open-sync" title="雲端同步" style="display:none" data-state="off"><span class="fab-icon">☁</span><span class="fab-label">雲端同步</span><span class="sync-dot"></span></button>
     </div>
@@ -49,6 +50,97 @@
             <div class="data-actions">
                 <button class="action-btn export" id="syncSignIn">使用 Google 登入</button>
                 <button class="action-btn" id="syncSignOut" style="display:none">登出</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="taskModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title">編輯任務</div>
+            <div class="setting-row">
+                <span class="setting-label">名稱</span>
+                <input type="text" class="text-input" id="taskEditName" maxlength="200">
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">預估蕃茄數<small>排入行程時用來估算完成時間</small></span>
+                <div class="stepper">
+                    <button class="seg-btn" id="taskEstMinus" aria-label="減少">−</button>
+                    <span id="taskEstValue">1</span>
+                    <button class="seg-btn" id="taskEstPlus" aria-label="增加">＋</button>
+                </div>
+            </div>
+            <div class="setting-row setting-col">
+                <span class="setting-label">固定任務<small>選了星期幾，那天第一次開啟時會自動排進行程</small></span>
+                <div class="seg day-seg" id="taskRepeat">
+                    <button class="seg-btn" data-day="1">一</button>
+                    <button class="seg-btn" data-day="2">二</button>
+                    <button class="seg-btn" data-day="3">三</button>
+                    <button class="seg-btn" data-day="4">四</button>
+                    <button class="seg-btn" data-day="5">五</button>
+                    <button class="seg-btn" data-day="6">六</button>
+                    <button class="seg-btn" data-day="0">日</button>
+                </div>
+            </div>
+            <div class="data-actions">
+                <button class="action-btn export" id="taskSave">儲存</button>
+                <button class="action-btn danger" id="taskDelete">刪除任務</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="dayModal">
+    <div class="modal-content">
+        <div class="modal-section">
+            <div class="modal-title" id="dayTitle">今日開始</div>
+            <div id="dayLeftoverBox">
+                <div class="stats-heading">之前沒做完的任務（勾選的會保留）</div>
+                <div class="check-list" id="dayLeftovers"></div>
+            </div>
+            <div id="dayRepeatBox">
+                <div class="stats-heading">今天的固定任務（勾選的會排入）</div>
+                <div class="check-list" id="dayRepeats"></div>
+            </div>
+            <div class="data-actions">
+                <button class="action-btn export" id="dayConfirm">開始今天</button>
+                <button class="action-btn" id="dayAskAi">🤖 請 AI 幫我排</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="aiModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title">複製給 AI</div>
+            <div class="setting-note top">勾選這次想請 AI 做的事，按「複製」後貼到你常用的 AI（Claude、ChatGPT、Gemini 都可以）。只會附上勾選項目需要的資料。</div>
+            <div class="check-list" id="aiAsks">
+                <label class="check-row"><input type="checkbox" value="plan"><span>幫我排今天的行程<small>附上任務庫、目前行程、今日記錄與最近 7 天彙總</small></span></label>
+                <label class="check-row"><input type="checkbox" value="review"><span>今日檢討<small>附上今日行程與今日記錄</small></span></label>
+                <label class="check-row"><input type="checkbox" value="week"><span>每週回顧<small>附上最近 7 天與前 7 天的彙總</small></span></label>
+                <label class="check-row"><input type="checkbox" value="month"><span>每月回顧<small>附上最近 30 天每天的彙總與各任務時間</small></span></label>
+            </div>
+            <textarea class="text-area" id="aiNote" rows="2" placeholder="補充說明（選填），例如：今天下午三點有會議、想早點結束"></textarea>
+            <details class="ai-preview">
+                <summary>預覽要複製的內容</summary>
+                <pre id="aiPreview"></pre>
+            </details>
+            <div class="data-actions">
+                <button class="action-btn export" id="aiCopy">📋 複製</button>
+            </div>
+        </div>
+        <div class="modal-section">
+            <div class="modal-title">貼上 AI 排的行程</div>
+            <div class="setting-note top">把 AI 回覆的行程清單貼在這裡，一行一個任務，例如「寫報告 x 3」。不在任務庫的新任務會用灰色排進行程。</div>
+            <textarea class="text-area" id="aiPlan" rows="5" placeholder="寫報告 x 3&#10;讀書 x 2"></textarea>
+            <div class="log-pending" id="aiPlanStatus"></div>
+            <div class="data-actions">
+                <button class="action-btn export" id="aiPlanReplace">取代今日行程</button>
+                <button class="action-btn" id="aiPlanAppend">加到行程後面</button>
             </div>
         </div>
     </div>
@@ -142,7 +234,10 @@
                 <li><strong>懸浮小視窗：</strong>按右上角 ⧉。Chrome／Edge 會開出可操作的置頂小視窗；Firefox 會在右下角出現預覽畫面，再按畫面上的「子母畫面」按鈕（或 Ctrl+Shift+]）讓時間浮在最上層，小視窗上的暫停鍵可以開始／暫停計時。</li>
                 <li><strong>安裝成 App：</strong>手機用瀏覽器選單的「加到主畫面」或「安裝應用程式」，之後可以全螢幕開啟，沒有網路也能用。計時中螢幕不會自動關閉。</li>
                 <li><strong>雲端同步：</strong>按右上角 ☁ 用 Google 登入，手機與電腦登入同一帳號就會自動同步任務庫、行程、記錄與設定。</li>
-                <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎ 改名，名稱清空即刪除（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
+                <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
+                <li><strong>預估與完成時間：</strong>有預估蕃茄數的任務，行程卡片會顯示「已完成／預估」，行程上方顯示還剩幾顆、大約幾點做完。</li>
+                <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
+                <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
                 <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改，按右邊的 ✕ 可以刪掉那一筆。</li>
             </ul>
@@ -227,6 +322,7 @@
 
     <div class="groove-wrapper">
         <div class="groove-header">今日行程</div>
+        <div class="groove-plan" id="schedulePlan"></div>
         <div class="groove-track" id="scheduleSlot"></div>
         <div class="groove-actions">
             <button class="clear-btn" data-action="clear-schedule">清空行程</button>
