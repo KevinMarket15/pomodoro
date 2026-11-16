@@ -92,6 +92,25 @@
     </div>
 </div>
 
+<div class="modal-overlay sheet" id="cardModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title" id="cardTitle"></div>
+            <div class="log-pending" id="cardInfo"></div>
+            <div class="card-stepper" id="cardStepper">
+                <button class="big-round" id="cardMinus" aria-label="少排一顆">−</button>
+                <div class="card-est"><span id="cardEst">1</span><small>顆蕃茄</small></div>
+                <button class="big-round" id="cardPlus" aria-label="多排一顆">＋</button>
+            </div>
+            <div class="data-actions">
+                <button class="action-btn export big" id="cardDone">✓ 完成</button>
+                <button class="action-btn danger big" id="cardRemove">✕ 移除</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="modal-overlay" id="dayModal">
     <div class="modal-content">
         <div class="modal-section">
@@ -226,8 +245,8 @@
                 <li><strong>倒數／正數：</strong>上方第二排切換。正數從 00:00 往上數（專注時稱為「自由專注」），想停時按「結束」：專注每滿一段專注時長（預設 25 分鐘）算一顆蕃茄，然後自動切到休息。</li>
                 <li><strong>時長設定：</strong>數字按鈕或直接點擊時間輸入，會設定「目前模式」的時長並記住。</li>
                 <li><strong>排入行程：</strong>在任務庫<strong>點一下</strong>任務，就會加到今日行程最後；行程裡已經有同一個任務時，再點一下是多排一顆蕃茄。也可以拖進中間凹槽指定位置（手機請先長按一下再拖）。</li>
-                <li><strong>調整行程：</strong>凹槽內的任務可拖曳調整順序；拖到外面放開或按 Esc 會回到原位，要移除請按右上角 ✕。</li>
-                <li><strong>完成任務：</strong>按行程任務左上角的 ✓，任務會劃掉並移到最下面，隔天自動清掉；再按一次可取消。任務卡下方會顯示今天已經花的時間。</li>
+                <li><strong>調整行程：</strong>凹槽內的任務可拖曳調整順序；拖到外面放開或按 Esc 會回到原位。</li>
+                <li><strong>行程任務的操作：</strong><strong>點一下</strong>行程裡的任務會跳出面板，可以按「完成」、用 −／＋ 調整要做幾顆蕃茄，或「移除」。完成的任務會劃掉並移到最下面，隔天自動清掉；再點一下可以取消完成。</li>
                 <li><strong>排序類別：</strong>按住類別標題右側的 ☰ 圖示上下拖曳。</li>
                 <li><strong>目前任務：</strong>凹槽最上面的任務就是目前任務（以按下開始時為準）。要換任務，把它拖到最上面。</li>
                 <li><strong>時間記錄：</strong>每段專注與休息結束後會自動記錄時間、任務與實際時長（中途結束的標示「中斷」），保留一年。按凹槽下方「時間記錄」查看，用 ‹ › 切換到過去有記錄的日子；可匯出當天的 CSV（試算表）或 Markdown（筆記），或一次匯出全部記錄的 CSV。</li>
@@ -235,7 +254,7 @@
                 <li><strong>安裝成 App：</strong>手機用瀏覽器選單的「加到主畫面」或「安裝應用程式」，之後可以全螢幕開啟，沒有網路也能用。計時中螢幕不會自動關閉。</li>
                 <li><strong>雲端同步：</strong>按右上角 ☁ 用 Google 登入，手機與電腦登入同一帳號就會自動同步任務庫、行程、記錄與設定。</li>
                 <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
-                <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數，按卡片下方的 −／＋ 可以調整要做幾顆；行程上方顯示還剩幾顆、大約幾點做完。</li>
+                <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完。</li>
                 <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
                 <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>

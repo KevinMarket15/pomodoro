@@ -416,3 +416,26 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
 .groove-track .task-card .est-btn { display: block; }
 .groove-track .task-card.done .est-btn { display: none; }
 .est-btn:hover { color: var(--accent-color); }
+
+/* --- 行程任務的操作面板 --- */
+.groove-track .task-card { cursor: pointer; }
+.task-card.done .task-name::before { content: '✓ '; color: var(--success-color); }
+.card-stepper { display: flex; align-items: center; justify-content: center; gap: 30px; margin: 22px 0 26px; }
+.big-round {
+    width: 58px; height: 58px; border-radius: 50%; border: none; cursor: pointer; flex-shrink: 0;
+    background: var(--bg-color); box-shadow: var(--small-outer); color: var(--accent-color); font-size: 1.6rem; line-height: 1;
+}
+.big-round:active { box-shadow: var(--inner-shadow); }
+.card-est { text-align: center; min-width: 70px; }
+.card-est span { display: block; font-size: 2.4rem; font-weight: 300; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.card-est small { font-size: 0.75rem; color: var(--faint); }
+.action-btn.big { padding: 16px 10px; font-size: 1rem; }
+@media (max-width: 768px) {
+    /* 手機：從螢幕下方滑出，拇指好按 */
+    .modal-overlay.sheet { align-items: flex-end; }
+    .sheet .modal-content {
+        width: 100%; max-width: none; border-radius: 28px 28px 0 0;
+        padding: 30px 24px calc(22px + env(safe-area-inset-bottom));
+    }
+    .sheet .modal-section { margin-bottom: 0; }
+}

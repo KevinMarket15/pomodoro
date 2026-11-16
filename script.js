@@ -440,10 +440,10 @@ function refreshScheduleTimes() {
         if (!el) return;
         const s = stats[card.querySelector('.task-name').innerText] || { sec: 0, pomo: 0 };
         const est = card.dataset.est ? cleanEst(card.dataset.est) : 0;
-        // 有預估顆數時顯示「已完成／預估」，已花的分鐘數放在滑鼠提示裡（卡片下排要留位置給 −／＋）
-        const minutes = s.sec >= 60 ? `${Math.round(s.sec / 60)}分` : '';
-        el.textContent = est ? `${s.pomo}/${est}🍅` : minutes;
-        card.title = minutes ? `今天已專注 ${minutes}鐘` : '';
+        const parts = [];
+        if (est) parts.push(`${s.pomo}/${est}🍅`);
+        if (s.sec >= 60) parts.push(`${Math.round(s.sec / 60)}分`);
+        el.textContent = parts.join(' ');
         if (est && !card.classList.contains('done')) remaining += Math.max(0, est - s.pomo);
     });
 
@@ -1224,31 +1224,48 @@ function appendScheduleCard(name, color, before = null, doneAt = null, est = nul
     if (est) div.dataset.est = cleanEst(est);
     if (doneAt) { div.classList.add('done'); div.dataset.doneAt = doneAt; }
 
-    const delBtn = document.createElement('span');
-    delBtn.textContent = '✕'; delBtn.className = 'delete-icon'; delBtn.title = '從行程移除';
-    delBtn.onclick = () => withUndo(STORAGE_KEY_SCHED, `已從行程移除「${name}」`, () => { div.remove(); saveSchedule(); });
-
-    const doneBtn = document.createElement('span');
-    doneBtn.textContent = '✓'; doneBtn.className = 'done-icon'; doneBtn.title = '完成／取消完成';
-    doneBtn.onclick = () => toggleDone(div);
+    // 卡片上不放小按鈕：點一下卡片，在操作面板裡完成、調整顆數或移除
+    div.onclick = () => { playTone('click'); openCardPanel(div); };
 
     const tag = document.createElement('div'); tag.className = 'tag'; tag.style.background = color;
     const text = document.createElement('div'); text.className = 'task-name'; text.innerText = name;
     const time = document.createElement('div'); time.className = 'task-time';
 
-    // 左下、右下的 −／＋：調整這個任務要做幾顆蕃茄
-    const minus = document.createElement('span');
-    minus.textContent = '−'; minus.className = 'est-btn est-minus'; minus.title = '少排一顆';
-    minus.onclick = () => { playTone('click'); changeCardEst(div, -1); };
-    const plus = document.createElement('span');
-    plus.textContent = '＋'; plus.className = 'est-btn est-plus'; plus.title = '多排一顆';
-    plus.onclick = () => { playTone('click'); changeCardEst(div, 1); };
-
-    div.appendChild(delBtn); div.appendChild(doneBtn); div.appendChild(tag); div.appendChild(text); div.appendChild(time);
-    div.appendChild(minus); div.appendChild(plus);
+    div.appendChild(tag); div.appendChild(text); div.appendChild(time);
     slot.insertBefore(div, before);
     return div;
 }
+
+/* 行程任務的操作面板（手機從下方滑出，按鈕夠大） */
+let panelCard = null;
+function renderCardPanel() {
+    const card = panelCard;
+    // 面板開著時行程被重畫（例如雲端同步進來），原本那張卡已經不在了
+    if (!card || !card.isConnected) { panelCard = null; document.getElementById('cardModal').classList.remove('show'); return; }
+    const name = card.querySelector('.task-name').innerText;
+    const done = card.classList.contains('done');
+    const s = todayTaskStats()[name] || { sec: 0, pomo: 0 };
+    document.getElementById('cardTitle').textContent = name;
+    document.getElementById('cardInfo').textContent = `今天已完成 ${s.pomo} 顆` + (s.sec >= 60 ? `，專注 ${Math.round(s.sec / 60)} 分鐘` : '');
+    document.getElementById('cardEst').textContent = card.dataset.est ? cleanEst(card.dataset.est) : 1;
+    document.getElementById('cardStepper').style.display = done ? 'none' : '';
+    document.getElementById('cardDone').textContent = done ? '↩ 取消完成' : '✓ 完成';
+}
+function openCardPanel(card) { panelCard = card; renderCardPanel(); toggleModal(true, 'cardModal'); }
+function closeCardPanel() { document.getElementById('cardModal').classList.remove('show'); }
+function panelAction(fn) {
+    const card = panelCard;
+    if (!card || !card.isConnected) { closeCardPanel(); return; }
+    fn(card);
+}
+document.getElementById('cardMinus').addEventListener('click', () => panelAction(card => { playTone('click'); changeCardEst(card, -1); renderCardPanel(); }));
+document.getElementById('cardPlus').addEventListener('click', () => panelAction(card => { playTone('click'); changeCardEst(card, 1); renderCardPanel(); }));
+document.getElementById('cardDone').addEventListener('click', () => panelAction(card => { closeCardPanel(); toggleDone(card); }));
+document.getElementById('cardRemove').addEventListener('click', () => panelAction(card => {
+    closeCardPanel();
+    const name = card.querySelector('.task-name').innerText;
+    withUndo(STORAGE_KEY_SCHED, `已從行程移除「${name}」`, () => { card.remove(); saveSchedule(); });
+}));
 
 // 調整行程卡片的預估蕃茄數（1–12）
 function changeCardEst(card, delta) {
