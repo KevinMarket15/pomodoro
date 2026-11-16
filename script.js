@@ -622,6 +622,7 @@ function finishCountUp() {
         next = earned && Math.floor(after / longEvery()) > Math.floor(before / longEvery()) ? 'long' : 'short';
     }
     switchMode(next);
+    autoDriveSave(false);
 }
 
 // completed = true 表示這段是自然結束（計入完成數）；false 表示按了「跳過」
@@ -646,6 +647,7 @@ function finishPhase() {
     announce(finished === 'focus'
         ? `專注結束！接下來是${MODE_LABELS[mode]}（${formatTime(timerSettings[mode])}）`
         : (auto ? '休息結束，下一顆蕃茄開始了！' : '休息結束，準備開始下一顆蕃茄！'), auto);
+    autoDriveSave(false);
 }
 
 window.setTimer = function(minutes) {
@@ -1710,6 +1712,15 @@ function buildAiText(asks, note) {
     }
     if (note) lines.push('', '## 補充說明', '', note);
 
+    lines.push(...aiDataLines(has));
+    return lines.join('\n') + '\n';
+}
+
+// 各段資料（計時設定、任務庫、今日行程與記錄、最近 7／30 天）。has(k) 決定要不要放某個請求需要的段落
+function aiDataLines(has) {
+    const today = todayKey();
+    const min = sec => Math.round(sec / 60);
+    const lines = [];
     lines.push('', '## 計時設定', '',
         `- 一顆蕃茄＝專注 ${min(timerSettings.focus)} 分鐘，短休息 ${min(timerSettings.short)} 分鐘，長休息 ${min(timerSettings.long)} 分鐘（每 ${longEvery()} 顆一次）`,
         `- 今天已完成 ${getTodayCount()} 顆`);
@@ -1763,7 +1774,73 @@ function buildAiText(asks, note) {
         const days = Array.from({ length: 30 }, (_, i) => addDays(today, i - 29));
         lines.push('', '## 最近 30 天', '', ...dailyTable(days), '', '各任務專注時間：', ...taskTotalLines(days[0], today));
     }
-    return lines.join('\n') + '\n';
+    return lines;
+}
+
+/* --- 存到 Google 雲端硬碟：把同一份資料存成一個檔案，讓 AI 透過雲端硬碟讀取 --- */
+function buildDriveText() {
+    const today = todayKey();
+    return [
+        '# 蕃茄鐘記錄', '',
+        `更新時間：${today} ${weekdayText(today)} ${clockText(Date.now())}`,
+        '（這份檔案由蕃茄鐘網頁自動產生，每次儲存都會整份覆蓋。1 顆蕃茄＝一段專注。）',
+        ...aiDataLines(() => true)
+    ].join('\n') + '\n';
+}
+
+function renderDriveStatus(result) {
+    const status = document.getElementById('driveStatus');
+    const link = document.getElementById('driveLink');
+    const id = timerSettings.driveFileId;
+    link.style.display = id ? '' : 'none';
+    if (id) link.href = `https://drive.google.com/file/d/${encodeURIComponent(id)}/view`;
+    const last = prefs.driveSavedAt ? `這台裝置上次儲存：${shortDate(dateKey(prefs.driveSavedAt))} ${clockText(prefs.driveSavedAt)}` : '';
+    if (!result || result.ok) { status.textContent = last || '還沒有存過。'; return; }
+    const messages = {
+        'signed-out': '同步還沒連上，請稍後再試。',
+        'need-auth': '授權過期了，請再按一次「存到雲端硬碟」。',
+        'popup': '授權視窗被瀏覽器擋住了，請允許彈出式視窗後再按一次。',
+        'cancelled': '授權視窗被關掉了，沒有儲存。',
+        'mismatch': '授權時選的 Google 帳號和登入的帳號不同，請選同一個帳號。',
+        'no-scope': '沒有取得雲端硬碟的權限。請再按一次，並在 Google 的畫面勾選允許存取雲端硬碟檔案。',
+        'api-disabled': '這個 Firebase 專案還沒啟用 Google Drive API，請先到 Google Cloud 主控台啟用。'
+    };
+    status.textContent = (messages[result.reason] || `儲存失敗：${result.detail || result.reason}`) + (last ? `\n${last}` : '');
+}
+
+let driveBusy = false;
+async function saveToDrive(interactive) {
+    const sync = window.pomodoroSync;
+    if (!sync || !sync.driveSave || driveBusy) return null;
+    driveBusy = true;
+    try {
+        const result = await sync.driveSave(interactive);
+        if (result.ok) { prefs.driveSavedAt = Date.now(); savePrefs(); }
+        return result;
+    } catch (err) {
+        return { ok: false, reason: 'error', detail: String((err && (err.code || err.message)) || err) };
+    } finally { driveBusy = false; }
+}
+document.getElementById('driveSave').addEventListener('click', async () => {
+    playTone('click');
+    document.getElementById('driveStatus').textContent = '儲存中…';
+    const result = await saveToDrive(true);
+    if (result) renderDriveStatus(result);
+});
+
+// 自動更新：只有存過一次（已經有檔案）才會做；授權過期時不跳視窗，mayAsk 時用提示列問一次
+function autoDriveSave(mayAsk) {
+    if (!timerSettings.driveFileId || !isUnlocked()) return;
+    saveToDrive(false).then(result => {
+        if (!result) return;
+        if (result.ok) { renderDriveStatus(result); return; }
+        if (result.reason !== 'need-auth' || !mayAsk || prefs.driveAskedDay === todayKey()) return;
+        prefs.driveAskedDay = todayKey(); savePrefs(); // 一天最多問一次
+        showToast('雲端硬碟的授權過期了，要重新授權並更新檔案嗎？', '更新', async () => {
+            const r = await saveToDrive(true);
+            if (r) renderDriveStatus(r);
+        }, 12000);
+    });
 }
 
 function selectedAiAsks() {
@@ -1780,6 +1857,7 @@ window.openAiModal = function() {
     const saved = Array.isArray(prefs.aiAsks) ? prefs.aiAsks : [];
     document.querySelectorAll('#aiAsks input').forEach(i => { i.checked = saved.includes(i.value); });
     document.getElementById('aiPlanStatus').textContent = '';
+    renderDriveStatus();
     updateAiPreview();
     toggleModal(true, 'aiModal');
 };
@@ -2245,6 +2323,11 @@ function adoptRemoteTimerState() {
 window.pomodoroApp = {
     keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG },
 
+    // 雲端硬碟的檔案：內容與檔案編號（編號放在時長設定裡一起同步，兩台裝置寫同一個檔案）
+    buildDriveText,
+    getDriveFileId: () => timerSettings.driveFileId || null,
+    setDriveFileId(id) { timerSettings.driveFileId = id; saveTimerSettings(); },
+
     // 可以逐項合併的資料（任務庫、行程）
     mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED],
     merge: mergeStored,
@@ -2337,4 +2420,5 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 window.addEventListener('DOMContentLoaded', () => {
     initApp();
     setTimeout(checkNewDay, 2500); // 稍等一下，讓雲端同步先把別台裝置的最新狀態帶進來
+    setTimeout(() => autoDriveSave(true), 9000); // 每次開啟也更新一次雲端硬碟的檔案（等同步連上之後）
 });

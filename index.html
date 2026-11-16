@@ -173,6 +173,16 @@
                 <button class="action-btn" id="aiPlanAppend">加到行程後面</button>
             </div>
         </div>
+        <div class="modal-section">
+            <div class="modal-title">存到 Google 雲端硬碟</div>
+            <div class="setting-note top">把任務庫、今日行程、今日記錄和最近 30 天的彙總，存成雲端硬碟裡的「蕃茄鐘記錄.md」，讓有連接雲端硬碟的 AI 直接讀取，不用每次複製貼上。第一次會請你授權；網站只能讀寫它自己建立的這個檔案，看不到硬碟裡的其他東西。</div>
+            <div class="setting-note top">存過一次之後，每段專注結束時會自動更新。Google 的授權每小時會過期，過期後要再按一次這個按鈕。</div>
+            <div class="log-pending" id="driveStatus"></div>
+            <div class="data-actions">
+                <button class="action-btn export" id="driveSave">☁ 存到雲端硬碟</button>
+                <a class="action-btn" id="driveLink" target="_blank" rel="noopener" style="display:none">開啟檔案</a>
+            </div>
+        </div>
     </div>
 </div>
 
@@ -267,7 +277,7 @@
                 <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
                 <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完。</li>
                 <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
-                <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。</li>
+                <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。也可以把資料存到 Google 雲端硬碟，讓有連接雲端硬碟的 AI 直接讀取。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
                 <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改，按右邊的 ✕ 可以刪掉那一筆。</li>
             </ul>

@@ -453,3 +453,5 @@ html.unlocked .gate { display: none; }
 .gate-title { font-size: 1.4rem; font-weight: 300; margin-top: 6px; }
 .gate-msg { font-size: 0.9rem; color: var(--muted); line-height: 1.6; white-space: pre-line; min-height: 1.6em; }
 .gate-card .action-btn { flex: none; width: 100%; margin-top: 6px; }
+
+a.action-btn { text-decoration: none; }

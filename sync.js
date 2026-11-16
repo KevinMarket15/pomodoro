@@ -393,6 +393,7 @@ async function signOutAndClear() {
     if (Object.keys(readMeta().dirty).length &&
         !confirm('有修改還沒上傳到雲端（可能是離線）。\n現在登出，這些修改會遺失。\n\n仍然要登出嗎？')) return;
     disconnect();
+    clearDriveToken();
     try { await fb.signOut(auth); } catch (err) {}
     Object.keys(localStorage)
         .filter(k => k.startsWith('pomodoro_') && k !== 'pomodoro_prefs_v1')
@@ -403,10 +404,92 @@ async function signOutAndClear() {
 // LINE、Facebook 等 App 內建的瀏覽器：Google 不允許在裡面登入
 const IN_APP_BROWSER = /\bLine\/|FBAN|FBAV|FB_IAB|Instagram|MicroMessenger/i.test(navigator.userAgent);
 
+/* --- 存到 Google 雲端硬碟 ---
+ * 只要求 drive.file 權限：只能讀寫這個網站自己建立的檔案。
+ * 授權（access token）由 Google 發給，約 1 小時過期；網頁沒辦法在背景自己續期，
+ * 過期後要由使用者按按鈕（跳出 Google 視窗）重新取得。 */
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_TOKEN_KEY = 'pomodoro_drive_token';
+const DRIVE_FILE_NAME = '蕃茄鐘記錄.md';
+let driveToken = null; // { value, exp }
+
+function currentDriveToken() {
+    const valid = t => t && typeof t.value === 'string' && t.exp > Date.now() + 60000;
+    if (valid(driveToken)) return driveToken.value;
+    try { const t = JSON.parse(sessionStorage.getItem(DRIVE_TOKEN_KEY) || 'null'); if (valid(t)) { driveToken = t; return t.value; } } catch (err) {}
+    return null;
+}
+function clearDriveToken() { driveToken = null; try { sessionStorage.removeItem(DRIVE_TOKEN_KEY); } catch (err) {} }
+
+async function requestDriveToken() {
+    const provider = new fb.GoogleAuthProvider();
+    provider.addScope(DRIVE_SCOPE);
+    if (auth.currentUser.email) provider.setCustomParameters({ login_hint: auth.currentUser.email });
+    const result = await fb.reauthenticateWithPopup(auth.currentUser, provider);
+    const cred = fb.GoogleAuthProvider.credentialFromResult(result);
+    if (!cred || !cred.accessToken) throw new Error('no-token');
+    driveToken = { value: cred.accessToken, exp: Date.now() + 55 * 60000 };
+    try { sessionStorage.setItem(DRIVE_TOKEN_KEY, JSON.stringify(driveToken)); } catch (err) {}
+    return driveToken.value;
+}
+
+async function driveError(res) {
+    let message = '';
+    try { message = (await res.json()).error.message || ''; } catch (err) {}
+    if (res.status === 401) { clearDriveToken(); return { ok: false, reason: 'need-auth' }; }
+    if (res.status === 403 && /has not been used|is disabled|accessNotConfigured/i.test(message)) return { ok: false, reason: 'api-disabled' };
+    if (res.status === 403 && /insufficient|scope/i.test(message)) { clearDriveToken(); return { ok: false, reason: 'no-scope' }; }
+    return { ok: false, reason: 'error', detail: `${res.status} ${message}`.trim() };
+}
+
+// interactive = true：可以跳出 Google 的授權視窗（只能在使用者按按鈕時用）
+async function driveSave(interactive) {
+    if (!uid || !auth.currentUser) return { ok: false, reason: 'signed-out' };
+    let token = currentDriveToken();
+    if (!token) {
+        if (!interactive) return { ok: false, reason: 'need-auth' };
+        try { token = await requestDriveToken(); }
+        catch (err) {
+            const code = (err && err.code) || '';
+            if (code === 'auth/popup-blocked') return { ok: false, reason: 'popup' };
+            if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') return { ok: false, reason: 'cancelled' };
+            if (code === 'auth/user-mismatch') return { ok: false, reason: 'mismatch' };
+            return { ok: false, reason: 'error', detail: code || String((err && err.message) || err) };
+        }
+    }
+    const text = app.buildDriveText();
+    const authHeader = { Authorization: `Bearer ${token}` };
+    let id = app.getDriveFileId();
+
+    if (id) { // 已經有檔案：整份覆蓋
+        const res = await fetch(`https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(id)}?uploadType=media`, {
+            method: 'PATCH', headers: { ...authHeader, 'Content-Type': 'text/markdown; charset=UTF-8' }, body: text
+        });
+        if (res.ok) return { ok: true, id };
+        if (res.status !== 404) return driveError(res);
+        id = null; // 檔案被刪掉了，重新建立
+    }
+    const boundary = `pomodoro-${Date.now()}`;
+    const body = [
+        `--${boundary}`, 'Content-Type: application/json; charset=UTF-8', '',
+        JSON.stringify({ name: DRIVE_FILE_NAME, mimeType: 'text/markdown' }),
+        `--${boundary}`, 'Content-Type: text/markdown; charset=UTF-8', '', text,
+        `--${boundary}--`
+    ].join('\r\n');
+    const res = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id', {
+        method: 'POST', headers: { ...authHeader, 'Content-Type': `multipart/related; boundary=${boundary}` }, body
+    });
+    if (!res.ok) return driveError(res);
+    id = (await res.json()).id;
+    app.setDriveFileId(id);
+    return { ok: true, id };
+}
+
 /* --- 給 script.js 用 --- */
 window.pomodoroSync = {
     isSignedIn: () => !!uid,
     flush,
+    driveSave,
     // 重置全部時一併清空雲端
     async resetCloud() {
         if (!uid) return;
