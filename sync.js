@@ -37,6 +37,21 @@ const statusEl = document.getElementById('syncStatus');
 const signInBtn = document.getElementById('syncSignIn');
 const signOutBtn = document.getElementById('syncSignOut');
 
+/* --- 登入門檻 ---
+ * 要登入、而且 Firestore 規則允許這個帳號讀取自己的資料，才能使用網頁。
+ * 誰能用由 Firebase 的規則決定，這裡不寫死帳號：之後在規則裡開放其他人，他們登入後就能用。
+ * 注意這只是擋畫面；真正保護資料的是 Firestore 規則。 */
+const gateMsg = document.getElementById('gateMsg');
+const gateBtn = document.getElementById('gateSignIn');
+const GATE_DEFAULT = '請用 Google 帳號登入後使用。';
+let gateNotice = ''; // 下一次回到登入畫面時要顯示的說明（例如這個帳號沒有權限）
+function unlock() { document.documentElement.classList.add('unlocked'); }
+function lock(msg, canSignIn = true) {
+    document.documentElement.classList.remove('unlocked');
+    gateMsg.textContent = msg;
+    gateBtn.style.display = canSignIn ? '' : 'none';
+}
+
 /* --- 本機同步資訊 --- */
 function readMeta() {
     try { return { uid: null, dirty: {}, logIds: [], ...JSON.parse(localStorage.getItem(META_KEY) || '{}') }; }
@@ -289,12 +304,23 @@ function disconnect() {
 // 登入後的對齊；失敗（多半是離線）就稍後再試，網頁照常可用
 async function connect(user) {
     disconnect();
+    const known = readMeta().uid === user.uid; // 這台裝置以前確認過這個帳號有權限
+    if (!known) lock('確認帳號中…', false);
     try {
-        await onSignedIn(user);
+        await onSignedIn(user); // 第一步就會讀雲端資料，規則不允許的帳號會在這裡被拒絕
+        unlock();
     } catch (err) {
         console.error('[sync]', err);
         disconnect();
+        if (err && err.code === 'permission-denied') {
+            // 這個帳號不在 Firestore 規則允許的範圍內
+            const m = readMeta(); if (m.uid === user.uid) { m.uid = null; writeMeta(m); }
+            gateNotice = `${user.email || '這個帳號'} 沒有使用權限。\n請改用有權限的 Google 帳號登入。`;
+            fb.signOut(auth).catch(() => {});
+            return;
+        }
         setStatus(navigator.onLine ? 'error' : 'offline');
+        if (!known) lock('無法確認這個帳號的使用權限，請確認網路連線，稍後會自動重試。', false);
         retryTimer = setTimeout(() => { if (auth.currentUser) connect(auth.currentUser); }, 30000);
     }
 }
@@ -303,6 +329,43 @@ function onSignedOut() {
     disconnect();
     uid = null;
     refreshStatus();
+    lock(gateNotice || GATE_DEFAULT);
+    gateNotice = '';
+}
+
+async function signIn() {
+    if (IN_APP_BROWSER) {
+        const msg = '這是 App 內建的瀏覽器，Google 不允許在這裡登入。\n請從右上角選單選「用瀏覽器開啟」（Chrome 或 Safari），再登入一次。';
+        setStatus('off', msg); gateMsg.textContent = msg;
+        return;
+    }
+    const provider = new fb.GoogleAuthProvider();
+    try {
+        await fb.signInWithPopup(auth, provider);
+    } catch (err) {
+        // 彈出視窗被擋時改用整頁跳轉登入
+        if (err.code === 'auth/popup-blocked' || err.code === 'auth/operation-not-supported-in-this-environment') {
+            await fb.signInWithRedirect(auth, provider);
+        } else if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
+            console.error('[sync] 登入失敗', err);
+            const msg = `登入失敗：${err.code || err.message}`;
+            setStatus('error', msg); gateMsg.textContent = msg;
+        }
+    }
+}
+
+// 登出：先把還沒上傳的修改送出去，再清掉這台裝置上的資料（偏好設定如深色模式會留著）
+async function signOutAndClear() {
+    if (!confirm('登出後會清除這台裝置上的資料。\n雲端的資料不受影響，再登入就會同步回來。\n\n確定登出？')) return;
+    await flush();
+    if (Object.keys(readMeta().dirty).length &&
+        !confirm('有修改還沒上傳到雲端（可能是離線）。\n現在登出，這些修改會遺失。\n\n仍然要登出嗎？')) return;
+    disconnect();
+    try { await fb.signOut(auth); } catch (err) {}
+    Object.keys(localStorage)
+        .filter(k => k.startsWith('pomodoro_') && k !== 'pomodoro_prefs_v1')
+        .forEach(k => localStorage.removeItem(k));
+    location.reload();
 }
 
 // LINE、Facebook 等 App 內建的瀏覽器：Google 不允許在裡面登入
@@ -332,7 +395,7 @@ window.pomodoroSync = {
 
 /* --- 啟動 --- */
 async function start() {
-    if (!firebaseConfig) return; // 還沒設定 Firebase：不顯示同步功能
+    if (!firebaseConfig) { unlock(); return; } // 還沒設定 Firebase：沒有同步，也沒有登入門檻
     fab.style.display = '';
     setStatus('connecting', '載入同步功能中…');
     try {
@@ -349,30 +412,14 @@ async function start() {
     } catch (err) {
         console.error('[sync] 無法載入 Firebase', err);
         setStatus('error', '無法載入同步功能（可能是離線），網頁仍可照常使用。');
+        // 這台裝置沒登入過就進不來；登入過的照常離線使用
+        if (!readMeta().uid) lock('需要網路連線才能登入。\n請連上網路後重新整理。', false);
         return;
     }
 
-    signInBtn.onclick = async () => {
-        if (IN_APP_BROWSER) {
-            setStatus('off', '這是 App 內建的瀏覽器，Google 不允許在這裡登入。\n請從右上角選單選「用瀏覽器開啟」（Chrome 或 Safari），再登入一次。');
-            return;
-        }
-        const provider = new fb.GoogleAuthProvider();
-        try {
-            await fb.signInWithPopup(auth, provider);
-        } catch (err) {
-            // 彈出視窗被擋時改用整頁跳轉登入
-            if (err.code === 'auth/popup-blocked' || err.code === 'auth/operation-not-supported-in-this-environment') {
-                await fb.signInWithRedirect(auth, provider);
-            } else if (err.code !== 'auth/popup-closed-by-user' && err.code !== 'auth/cancelled-popup-request') {
-                console.error('[sync] 登入失敗', err);
-                setStatus('error', `登入失敗：${err.code || err.message}`);
-            }
-        }
-    };
-    signOutBtn.onclick = () => {
-        if (confirm('登出後這台裝置會停止同步（本機資料會保留）。確定登出？')) fb.signOut(auth);
-    };
+    signInBtn.onclick = signIn;
+    gateBtn.onclick = signIn;
+    signOutBtn.onclick = signOutAndClear;
 
     fb.getRedirectResult(auth).catch(err => console.error('[sync] 登入失敗', err));
     fb.onAuthStateChanged(auth, user => {

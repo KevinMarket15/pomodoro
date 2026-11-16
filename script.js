@@ -1,3 +1,10 @@
+/* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
+ * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
+try {
+    if (JSON.parse(localStorage.getItem('pomodoro_sync_meta') || '{}').uid) document.documentElement.classList.add('unlocked');
+} catch (err) {}
+const isUnlocked = () => document.documentElement.classList.contains('unlocked');
+
 /* --- 偏好設定（只存在這台裝置，不同步）：外觀、音量、常駐通知 --- */
 const STORAGE_KEY_PREFS = 'pomodoro_prefs_v1';
 const IS_TOUCH = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
@@ -702,7 +709,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('focus', stopAttention);
 // 鍵盤快捷鍵：空白鍵開始／暫停、S 跳過、R 重置（打字或視窗開著時不作用）
 document.addEventListener('keydown', (e) => {
-    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat || !isUnlocked()) return;
     const t = e.target;
     if (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
     if (document.querySelector('.modal-overlay.show')) return;
@@ -1611,7 +1618,7 @@ function markDayStarted() { timerSettings.dayStarted = todayKey(); saveTimerSett
 
 function checkNewDay() {
     const today = todayKey();
-    if (timerSettings.dayStarted === today || drag || document.querySelector('.modal-overlay.show')) return;
+    if (timerSettings.dayStarted === today || drag || !isUnlocked() || document.querySelector('.modal-overlay.show')) return;
     const firstTime = !timerSettings.dayStarted; // 第一次有這個功能：行程裡的不算「之前沒做完」
     const leftovers = firstTime ? [] : [...slot.querySelectorAll('.task-card:not(.done):not(.drop-placeholder)')];
     const repeats = dueRepeats();

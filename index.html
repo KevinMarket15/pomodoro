@@ -17,6 +17,16 @@
 </head>
 <body>
 
+<!-- 登入門檻：登入並確認有權限後才會收起來（見 sync.js） -->
+<div class="gate" id="gate">
+    <div class="gate-card">
+        <img src="icons/icon-192.png" alt="" width="76" height="76">
+        <div class="gate-title">蕃茄鐘排程器</div>
+        <div class="gate-msg" id="gateMsg">載入中…</div>
+        <button class="action-btn export big" id="gateSignIn" style="display:none">使用 Google 登入</button>
+    </div>
+</div>
+
 <!-- 右上角按鈕列：電腦攤開成一排，手機收成一個 ☰ 選單 -->
 <div class="fab-bar" id="fabBar">
     <button class="help-fab fab-toggle" id="fabToggle" title="選單" aria-label="選單">☰</button>
@@ -46,6 +56,7 @@
                 <li>用 Google 帳號登入後，登入同一帳號的手機與電腦會自動同步：任務庫、今日行程、時間記錄（含今日蕃茄數）與時長設定。</li>
                 <li>正在進行的計時也會同步：在電腦按開始，手機會接著顯示同一段計時；暫停、重置也一樣。時間到時兩台都會提醒。</li>
                 <li>離線時照常使用，恢復連線後會自動上傳。</li>
+                <li>這個網頁要登入後才能使用。登出時會清除這台裝置上的資料，雲端的資料不受影響，再登入就會同步回來。</li>
             </ul>
             <div class="data-actions">
                 <button class="action-btn export" id="syncSignIn">使用 Google 登入</button>

@@ -442,3 +442,15 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
 
 /* 手機不提供懸浮視窗（看通知列的常駐通知就好） */
 @media (pointer: coarse) { .fab-items .float-fab { display: none; } }
+
+/* --- 登入門檻 --- */
+.gate {
+    position: fixed; inset: 0; z-index: 5000; display: flex; align-items: center; justify-content: center;
+    background: var(--bg-color); padding: 24px;
+}
+html.unlocked .gate { display: none; }
+.gate-card { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; max-width: 320px; text-align: center; }
+.gate-card img { border-radius: 22px; box-shadow: var(--outer-shadow); }
+.gate-title { font-size: 1.4rem; font-weight: 300; margin-top: 6px; }
+.gate-msg { font-size: 0.9rem; color: var(--muted); line-height: 1.6; white-space: pre-line; min-height: 1.6em; }
+.gate-card .action-btn { flex: none; width: 100%; margin-top: 6px; }
