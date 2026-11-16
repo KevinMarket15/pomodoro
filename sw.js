@@ -56,15 +56,22 @@ self.addEventListener('fetch', (event) => {
     // 其他（登入、資料庫連線）不處理，照常走網路
 });
 
-// 點了「時間到」的通知：把蕃茄鐘視窗叫到前面，並請它開始下一段
+// 點了通知：把蕃茄鐘叫到前面。同時開著好幾個的話，優先選「安裝成 App」開的那個
+// （它的網址帶有 ?app=1），其次是目前看得到的，最後才是其他分頁；都沒有才開新的。
 self.addEventListener('notificationclick', (event) => {
     event.notification.close();
-    event.waitUntil(
-        self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
-            const client = list[0];
-            if (!client) return self.clients.openWindow('./');
-            client.postMessage({ type: 'notification-click', tag: event.notification.tag });
-            return client.focus();
-        })
-    );
+    const tag = event.notification.tag;
+    event.waitUntil((async () => {
+        const list = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
+        const score = c => (c.url.includes('app=1') ? 4 : 0) + (c.focused ? 2 : 0) + (c.visibilityState === 'visible' ? 1 : 0);
+        list.sort((a, b) => score(b) - score(a));
+        for (const client of list) {
+            try {
+                client.postMessage({ type: 'notification-click', tag });
+                await client.focus();
+                return;
+            } catch (err) { /* 這個叫不到前面，試下一個 */ }
+        }
+        await self.clients.openWindow('./?app=1');
+    })());
 });

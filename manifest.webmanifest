@@ -3,7 +3,7 @@
   "short_name": "蕃茄鐘",
   "description": "蕃茄鐘、今日行程與時間記錄",
   "lang": "zh-TW",
-  "start_url": "./",
+  "start_url": "./?app=1",
   "scope": "./",
   "display": "standalone",
   "background_color": "#e0e5ec",

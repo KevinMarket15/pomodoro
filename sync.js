@@ -1,6 +1,8 @@
 /* --- 雲端同步（Firebase：Google 登入 + Firestore） ---
  * 資料仍以 localStorage 為主，這裡只負責和雲端互相同步：
- *   users/{uid}/kv/{名稱}   任務庫、行程、時長設定、計時狀態，各一份（以最後寫入為準；計時狀態另外比版本時間）
+ *   users/{uid}/kv/{名稱}   任務庫、行程、時長設定、計時狀態，各一份
+ *                           任務庫與行程：兩邊都改過時逐項合併（見 script.js 的 mergeStored）
+ *                           計時狀態：比版本時間，新的贏；時長設定：以最後寫入為準
  *   users/{uid}/logs/{id}   每筆時間記錄一份，兩台裝置的記錄會合併（今日蕃茄數由記錄算出）
  *
  * 記錄保留一年，可能有幾千筆。為了不要每次開網頁都把全部讀一遍（免費額度有每日讀取上限）：
@@ -69,6 +71,16 @@ function clearDirty(key, version) {
     if (version === undefined || meta.dirty[key] === version) delete meta.dirty[key];
     writeMeta(meta);
 }
+// base：每份可合併的資料「上次和雲端一致時的內容」，合併時用來判斷是誰改了什麼
+const MERGEABLE = new Set(app.mergeable);
+function getBase(key) { const b = readMeta().base; return b && typeof b[key] === 'string' ? b[key] : null; }
+function setBase(key, value) {
+    if (!MERGEABLE.has(key)) return;
+    const meta = readMeta();
+    meta.base = meta.base || {};
+    if (value === null || value === undefined) delete meta.base[key]; else meta.base[key] = value;
+    writeMeta(meta);
+}
 function rememberLogIds() { const meta = readMeta(); meta.logIds = [...knownRemoteLogs]; writeMeta(meta); }
 
 const logId = l => `${l.start}_${l.mode}`;
@@ -99,6 +111,7 @@ function refreshStatus() {
 window.addEventListener('online', () => {
     refreshStatus();
     if (uid && !connected && auth.currentUser) connect(auth.currentUser); // 離線時開啟的：連上線後補做對齊
+    else if (uid && connected && Object.keys(readMeta().dirty).length) flush(); // 離線時改的：連上線後補傳
 });
 window.addEventListener('offline', refreshStatus);
 
@@ -135,7 +148,8 @@ async function flush() {
 
 async function pushKv(key) {
     const ref = fb.doc(db, 'users', uid, 'kv', KV_NAME[key]);
-    const value = localStorage.getItem(key);
+    let value = localStorage.getItem(key);
+
     // 有版本時間的資料（計時狀態）：雲端的比較新就不要蓋過去，改成採用雲端的
     const localRev = app.revOf(key, value);
     if (localRev !== null) {
@@ -146,8 +160,20 @@ async function pushKv(key) {
             return;
         }
     }
+
+    // 任務庫與行程：上傳前先看雲端是不是被別台改過；改過就逐項合併，把合併結果同時寫回本機與雲端
+    if (MERGEABLE.has(key) && value !== null) {
+        const snap = await fb.getDoc(ref);
+        const remote = snap.exists() ? snap.data().value : null;
+        if (remote !== null && remote !== value && remote !== getBase(key)) {
+            const merged = app.merge(key, getBase(key), value, remote);
+            if (merged !== value) { applyLocal(key, merged); value = merged; }
+        }
+    }
+
     if (value === null) await fb.deleteDoc(ref);
     else await fb.setDoc(ref, { value, updatedAt: Date.now() });
+    setBase(key, value);
 }
 
 // 記錄用差異上傳：本機有、雲端沒有的新增；雲端有、本機刪掉的刪除
@@ -193,6 +219,7 @@ function onKvSnapshot(snap) {
             clearDirty(key);
         }
         applyLocal(key, value);
+        setBase(key, value); // 這份資料現在和雲端一致
     });
     refreshStatus();
 }
@@ -252,6 +279,7 @@ async function onSignedIn(user) {
     const meta = readMeta();
     const sameAccount = meta.uid === uid;
     knownRemoteLogs = new Set(sameAccount ? meta.logIds : []);
+    if (!sameAccount) { const m0 = readMeta(); m0.base = {}; writeMeta(m0); } // 換了帳號，之前記的 base 不能用
 
     const snap = await fb.getDocs(fb.collection(db, 'users', uid, 'kv'));
     const cloud = {};
@@ -271,12 +299,16 @@ async function onSignedIn(user) {
     if (useCloud) {
         // 同一個帳號且離線時改過的項目，以本機為準
         Object.entries(KV).forEach(([name, key]) => {
-            if (sameAccount && dirtyKeys.includes(key)) return;
-            if (name in cloud) applyLocal(key, cloud[name]);
+            if (sameAccount && dirtyKeys.includes(key)) return; // 上傳時會和雲端合併（見 pushKv）
+            if (name in cloud) { applyLocal(key, cloud[name]); setBase(key, cloud[name]); }
         });
     } else {
         app.ensureSaved();
-        Object.values(KV).forEach(key => { if (localStorage.getItem(key) !== null) markDirty(key); });
+        Object.entries(KV).forEach(([name, key]) => {
+            if (localStorage.getItem(key) !== null) markDirty(key);
+            // 使用者選了用這台的資料覆蓋雲端：把雲端現況當成 base，上傳時就不會再合併回來
+            if (name in cloud) setBase(key, cloud[name]);
+        });
     }
 
     const m = readMeta(); m.uid = uid; writeMeta(m);
@@ -389,7 +421,7 @@ window.pomodoroSync = {
             await batch.commit();
         }
         knownRemoteLogs = new Set();
-        const meta = readMeta(); meta.dirty = {}; meta.logIds = []; writeMeta(meta);
+        const meta = readMeta(); meta.dirty = {}; meta.logIds = []; meta.base = {}; writeMeta(meta);
     }
 };
 

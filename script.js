@@ -126,11 +126,17 @@ function cleanCategories(raw) {
         return { title: cleanText(c.title, 100) || '未命名', color: cleanColor(c.color), tasks, meta };
     });
 }
+function newItemId() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 8); }
 function cleanSchedule(raw) {
     if (!Array.isArray(raw)) return [];
+    const seen = {};
     return raw.slice(0, 500).filter(t => t && typeof t === 'object' && cleanText(t.name))
         .map(t => {
-            const item = { name: cleanText(t.name), color: cleanColor(t.color) };
+            const name = cleanText(t.name);
+            // 每個行程項目有自己的編號。舊資料沒有編號時，用「名稱＋第幾個」產生，
+            // 這樣兩台裝置對同一份舊資料會算出一樣的編號
+            const n = seen[name] = (seen[name] || 0) + 1;
+            const item = { id: cleanText(t.id, 40) || `old:${name}:${n}`, name, color: cleanColor(t.color) };
             if (t.done) { item.done = true; item.doneAt = Number.isFinite(t.doneAt) ? t.doneAt : Date.now(); }
             if (t.est != null) item.est = cleanEst(t.est);
             return item;
@@ -772,7 +778,7 @@ function saveCategories() {
 function saveSchedule() {
     const schedule = [];
     document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
-        const item = { name: card.querySelector('.task-name').innerText, color: card.dataset.color || card.querySelector('.tag').style.background };
+        const item = { id: card.dataset.id, name: card.querySelector('.task-name').innerText, color: card.dataset.color || card.querySelector('.tag').style.background };
         if (card.classList.contains('done')) { item.done = true; item.doneAt = Number(card.dataset.doneAt) || Date.now(); }
         if (card.dataset.est) item.est = cleanEst(card.dataset.est);
         schedule.push(item);
@@ -795,7 +801,7 @@ function renderScheduleFromStorage() {
     const items = cleanSchedule(readStoredJSON(STORAGE_KEY_SCHED));
     const today = todayKey();
     const kept = items.filter(t => !(t.done && dateKey(t.doneAt) !== today)); // 前幾天完成的任務清掉
-    kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null, t.est));
+    kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null, t.est, t.id));
     if (kept.length !== items.length) saveSchedule();
     updateCurrentTask();
 }
@@ -1231,10 +1237,11 @@ function addToSchedule(name, color, sound = true, before = null, est = null) {
 }
 
 // 只建立卡片、不存檔（從儲存的資料重畫時用，避免把剛收到的雲端資料又當成本機修改傳回去）
-function appendScheduleCard(name, color, before = null, doneAt = null, est = null) {
+function appendScheduleCard(name, color, before = null, doneAt = null, est = null, id = null) {
     const div = document.createElement('div');
     div.className = 'task-card';
     div.dataset.color = color;
+    div.dataset.id = id || newItemId();
     if (est) div.dataset.est = cleanEst(est);
     if (doneAt) { div.classList.add('done'); div.dataset.doneAt = doneAt; }
 
@@ -2036,16 +2043,26 @@ async function openVideoPip() {
         panel.className = 'video-pip-panel';
         panel.innerHTML = `
             <button class="modal-close" title="關閉懸浮時間">×</button>
-            <div class="vp-hint">
-                把滑鼠移到下方畫面上，按右側出現的「子母畫面」按鈕（或按 <b>Ctrl+Shift+]</b>），時間就會浮在所有視窗上方。<br>
-                小視窗上的<b>暫停鍵</b>可以開始／暫停計時。<br>
-                這個面板要留著，關掉會一起關閉懸浮時間。
-            </div>`;
+            <div class="vp-hint">${IS_TOUCH
+                ? `這個瀏覽器不能由網頁開子母畫面。可以按「全螢幕」把它當成全螢幕時鐘；有些手機瀏覽器在全螢幕時回到桌面，會把它縮成小視窗。`
+                : `把滑鼠移到下方畫面上，按右側出現的「子母畫面」按鈕（或按 <b>Ctrl+Shift+]</b>），時間就會浮在所有視窗上方。<br>
+                   小視窗上的<b>暫停鍵</b>可以開始／暫停計時。<br>
+                   這個面板要留著，關掉會一起關閉懸浮時間。`}
+            </div>
+            <button class="action-btn vp-full">⛶ 全螢幕</button>`;
         const video = document.createElement('video');
         video.muted = true; video.playsInline = true;
         panel.appendChild(video);
         document.body.appendChild(panel);
         panel.querySelector('.modal-close').onclick = () => closeVideoPip();
+        panel.querySelector('.vp-full').onclick = () => {
+            playTone('click');
+            video.play().catch(() => {});
+            try {
+                if (video.requestFullscreen) video.requestFullscreen().catch(() => {});
+                else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); // iPhone 的 Safari
+            } catch (err) {}
+        };
 
         videoPip = { canvas, video, panel, stream: null, openedAt: Date.now() };
         drawPipCanvas(); // 先畫一張，串流才有畫面
@@ -2139,6 +2156,78 @@ function drawPipCanvas() {
     ctx.fillText(isRunning ? '計時中 · 按暫停鍵可暫停' : (session ? '已暫停 · 按暫停鍵繼續' : '按暫停鍵開始'), W / 2, 318);
 }
 
+/* --- 任務庫與行程的合併 ---
+ * 兩台裝置各自改了同一份資料時，不再是「後傳的整份蓋掉先傳的」，而是逐項合併。
+ * 做法是三方比對：base（上次兩邊一致時的內容）、local（這台現在的）、remote（雲端現在的）。
+ *   - 某一項只有一邊改過 → 用改過的那邊
+ *   - 一邊新增的 → 留下
+ *   - 一邊刪掉、另一邊沒動過 → 刪掉；另一邊也改過 → 留下改過的
+ *   - 兩邊都改了同一項 → 以這台裝置的為準
+ */
+const sameJSON = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+// 幫清單的每一項配上辨識用的 id；同名的第二個之後加上 #2、#3
+function withIds(list, keyOf) {
+    const seen = {};
+    return list.map(item => {
+        const k = keyOf(item);
+        const n = seen[k] = (seen[k] || 0) + 1;
+        return { id: n > 1 ? `${k}#${n}` : k, item };
+    });
+}
+
+function mergeList(base, local, remote, mergeItem = (b, l, r) => (b !== undefined && sameJSON(l, b) ? r : l)) {
+    const B = new Map(base.map(x => [x.id, x.item]));
+    const L = new Map(local.map(x => [x.id, x.item]));
+    const R = new Map(remote.map(x => [x.id, x.item]));
+    const out = new Map();
+    local.forEach(({ id, item }) => {
+        if (R.has(id)) out.set(id, mergeItem(B.get(id), item, R.get(id)));
+        else if (B.has(id) && sameJSON(item, B.get(id))) return; // 對方刪了，這邊沒動過
+        else out.set(id, item);                                   // 這邊新增的，或對方刪了但這邊改過
+    });
+    remote.forEach(({ id, item }) => { if (!L.has(id) && !B.has(id)) out.set(id, item); }); // 對方新增的
+
+    // 順序：這邊沒調過順序就照對方的，否則照這邊的；另一邊新增的項目插在它原本前一項的後面
+    const ids = list => list.map(x => x.id);
+    const inAll = id => B.has(id) && L.has(id) && R.has(id);
+    const localMoved = !sameJSON(ids(local).filter(inAll), ids(base).filter(inAll));
+    const [backbone, other] = localMoved ? [local, remote] : [remote, local];
+    const order = ids(backbone).filter(id => out.has(id));
+    const src = ids(other);
+    src.forEach((id, i) => {
+        if (!out.has(id) || order.includes(id)) return;
+        const pred = src.slice(0, i).reverse().find(p => order.includes(p));
+        order.splice(pred === undefined ? 0 : order.indexOf(pred) + 1, 0, id);
+    });
+    return order.map(id => out.get(id));
+}
+
+function mergeCategory(b, l, r) {
+    const names = c => withIds(c ? c.tasks : [], t => t);
+    const tasks = mergeList(names(b), names(l), names(r));
+    const meta = {};
+    tasks.forEach(t => {
+        const bm = b && b.meta[t], lm = l.meta[t], rm = r.meta[t];
+        const pick = sameJSON(lm, bm) ? rm : lm;
+        if (pick) meta[t] = pick;
+    });
+    return { title: l.title, color: b && l.color === b.color ? r.color : l.color, tasks, meta };
+}
+
+function mergeStored(key, baseStr, localStr, remoteStr) {
+    const parse = s => { try { return JSON.parse(s || '[]'); } catch (err) { return []; } };
+    if (key === STORAGE_KEY_CATS) {
+        const prep = s => withIds(cleanCategories(parse(s)), c => c.title);
+        return JSON.stringify(mergeList(prep(baseStr), prep(localStr), prep(remoteStr), mergeCategory));
+    }
+    if (key === STORAGE_KEY_SCHED) {
+        const prep = s => withIds(cleanSchedule(parse(s)), t => t.id);
+        return JSON.stringify(mergeList(prep(baseStr), prep(localStr), prep(remoteStr)));
+    }
+    return localStr;
+}
+
 // 套用另一台裝置傳來的計時狀態（已經寫進 localStorage）
 function adoptRemoteTimerState() {
     isRunning = false;
@@ -2155,6 +2244,10 @@ function adoptRemoteTimerState() {
 /* --- 8. 給同步模組 (sync.js) 用的介面 --- */
 window.pomodoroApp = {
     keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG },
+
+    // 可以逐項合併的資料（任務庫、行程）
+    mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED],
+    merge: mergeStored,
 
     // 計時狀態的版本時間（越大越新）；其他資料沒有版本，回傳 null
     revOf(key, value) {
