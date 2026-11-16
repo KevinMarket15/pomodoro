@@ -1758,7 +1758,8 @@ function aiDataLines(has) {
         lines.push('', '## 今日記錄', '');
         if (todayLogs.length) {
             lines.push('| 開始 | 結束 | 類型 | 任務 | 實際(分) | 狀態 |', '|---|---|---|---|---:|---|');
-            todayLogs.map(logRow).forEach(r => lines.push(`| ${r.start} | ${r.end} | ${r.type} | ${mdCell(r.task)} | ${r.actual} | ${r.status} |`));
+            // 給 AI 讀的文字不放表情符號（有些工具讀檔時會變成亂碼），改寫成「顆」
+            todayLogs.map(logRow).forEach(r => lines.push(`| ${r.start} | ${r.end} | ${r.type} | ${mdCell(r.task)} | ${r.actual} | ${r.status.replace(' 🍅', ' 顆')} |`));
         } else lines.push('（今天還沒有記錄）');
     }
 
