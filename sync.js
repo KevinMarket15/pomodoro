@@ -1,18 +1,25 @@
 /* --- 雲端同步（Firebase：Google 登入 + Firestore） ---
  * 資料仍以 localStorage 為主，這裡只負責和雲端互相同步：
- *   users/{uid}/kv/{名稱}   任務庫、行程、時長設定、今日蕃茄數，各一份（以最後寫入為準）
- *   users/{uid}/logs/{id}   每筆時間記錄一份，兩台裝置的記錄會合併
+ *   users/{uid}/kv/{名稱}   任務庫、行程、時長設定，各一份（以最後寫入為準）
+ *   users/{uid}/logs/{id}   每筆時間記錄一份，兩台裝置的記錄會合併（今日蕃茄數由記錄算出）
  * 正在進行的計時狀態不同步。
+ *
+ * 記錄保留一年，可能有幾千筆。為了不要每次開網頁都把全部讀一遍（免費額度有每日讀取上限）：
+ *   - 平常只即時監聽最近 LOG_WINDOW_DAYS 天的記錄
+ *   - 每隔 FULL_SYNC_DAYS 天（或換帳號時）才完整核對一次全部記錄
  */
 import { firebaseConfig } from './firebase-config.js';
 
 const FIREBASE_VERSION = '10.12.2';
 const META_KEY = 'pomodoro_sync_meta'; // 同步用的本機資訊：上次登入的帳號、還沒傳上去的項目、已知的雲端記錄
+const DAY_MS = 24 * 60 * 60 * 1000;
+const LOG_WINDOW_DAYS = 14; // 即時監聽最近幾天的記錄
+const FULL_SYNC_DAYS = 7;   // 每隔幾天完整核對一次（必須小於上面的天數，兩次核對之間才不會有漏掉的區間）
 
 const app = window.pomodoroApp;
 const K = app.keys;
 // 雲端文件名稱 ↔ localStorage key
-const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer, stats: K.stats };
+const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer };
 const KV_NAME = Object.fromEntries(Object.entries(KV).map(([name, key]) => [key, name]));
 
 let fb = null;            // 載入後的 Firebase 函式
@@ -21,7 +28,9 @@ let uid = null;
 let unsubscribers = [];
 let applying = false;     // 正在把雲端資料寫回本機，這期間的變動不要再傳上去
 let pushTimer = null;
-let knownRemoteLogs = new Set();
+let knownRemoteLogs = new Set(); // 這台裝置所知「雲端上有的記錄」，用來分辨是對方新增的還是自己刪掉的
+let connected = false;           // 登入後的第一次對齊與監聽是否已經完成
+let retryTimer = null;
 let status = 'off';
 
 const fab = document.getElementById('syncFab');
@@ -70,9 +79,13 @@ function setStatus(next, detail) {
 function refreshStatus() {
     if (!uid) return setStatus('off');
     if (!navigator.onLine) return setStatus('offline');
+    if (!connected) return setStatus('connecting');
     setStatus(Object.keys(readMeta().dirty).length ? 'syncing' : 'ok');
 }
-window.addEventListener('online', refreshStatus);
+window.addEventListener('online', () => {
+    refreshStatus();
+    if (uid && !connected && auth.currentUser) connect(auth.currentUser); // 離線時開啟的：連上線後補做對齊
+});
 window.addEventListener('offline', refreshStatus);
 
 /* --- 本機有變動：記下來，稍後上傳 --- */
@@ -92,11 +105,13 @@ function schedulePush() {
 
 async function flush() {
     clearTimeout(pushTimer);
-    if (!uid) return;
+    if (!uid || !connected) return;
     const dirty = { ...readMeta().dirty };
     try {
-        await Promise.all(Object.entries(dirty).map(([key, version]) =>
-            (key === K.logs ? pushLogs() : pushKv(key)).then(() => clearDirty(key, version))));
+        await Promise.all(Object.entries(dirty).map(([key, version]) => {
+            if (key !== K.logs && !KV_NAME[key]) { clearDirty(key); return null; } // 舊版留下、已經不同步的項目
+            return (key === K.logs ? pushLogs() : pushKv(key)).then(() => clearDirty(key, version));
+        }));
         refreshStatus();
     } catch (err) {
         console.error('[sync] 上傳失敗', err);
@@ -151,34 +166,47 @@ function onKvSnapshot(snap) {
     refreshStatus();
 }
 
-function onLogsSnapshot(snap) {
-    const remote = new Map(snap.docs.map(d => [d.id, d.data().value]));
+// 把雲端某個範圍的記錄和本機對齊。
+// remote：Map(文件名稱 → 內容)；since：這批資料涵蓋的起點（文件名稱開頭是開始時間，空字串代表全部）
+function mergeRemoteLogs(remote, since) {
+    const inRange = id => id >= since;
     let local = app.loadLogs();
     const localIds = new Set(local.map(logId));
     let changed = false;
 
     // 其他裝置新增的記錄（已知但本機沒有的，是這台裝置自己刪的，不要加回來）
     remote.forEach((value, id) => {
-        if (!localIds.has(id) && !knownRemoteLogs.has(id)) { local.push(JSON.parse(value)); changed = true; }
+        if (localIds.has(id) || knownRemoteLogs.has(id)) return;
+        try { local.push(JSON.parse(value)); changed = true; } catch (err) {}
     });
-    // 其他裝置刪掉的記錄（以前在雲端、現在不見了）
-    const removed = [...knownRemoteLogs].filter(id => !remote.has(id));
-    if (removed.length) { local = local.filter(l => !removed.includes(logId(l))); changed = true; }
+    // 其他裝置刪掉的記錄（以前在雲端、現在這個範圍內不見了）
+    const removed = new Set([...knownRemoteLogs].filter(id => inRange(id) && !remote.has(id)));
+    if (removed.size) { local = local.filter(l => !removed.has(logId(l))); changed = true; }
 
-    knownRemoteLogs = new Set(remote.keys());
+    // 範圍外的沿用原本所知，範圍內的以這次看到的為準
+    knownRemoteLogs = new Set([...[...knownRemoteLogs].filter(id => !inRange(id)), ...remote.keys()]);
     rememberLogIds();
     if (changed) {
         applying = true;
         try { app.saveLogs(local); app.applyRemote(K.logs); } finally { applying = false; }
     }
 
-    // 本機有雲端沒有的（或已過期被刪掉的），排程上傳
+    // 本機和雲端不一致（本機有新的，或本機已刪除／過期），排程上傳
     const now = app.loadLogs();
     const nowIds = new Set(now.map(logId));
-    if (now.some(l => !remote.has(logId(l))) || [...remote.keys()].some(id => !nowIds.has(id))) {
+    if (now.some(l => !knownRemoteLogs.has(logId(l))) || [...knownRemoteLogs].some(id => !nowIds.has(id))) {
         markDirty(K.logs);
         schedulePush();
     }
+}
+
+const logDocsToMap = snap => new Map(snap.docs.map(d => [d.id, d.data().value]));
+
+// 完整核對全部記錄（讀取量大，只偶爾做）
+async function fullLogSync() {
+    const snap = await fb.getDocs(fb.collection(db, 'users', uid, 'logs'));
+    mergeRemoteLogs(logDocsToMap(snap), '');
+    const meta = readMeta(); meta.lastFull = Date.now(); writeMeta(meta);
 }
 
 /* --- 登入後第一次對齊 --- */
@@ -221,19 +249,48 @@ async function onSignedIn(user) {
     }
 
     const m = readMeta(); m.uid = uid; writeMeta(m);
+
+    if (!sameAccount || !meta.lastFull || Date.now() - meta.lastFull > FULL_SYNC_DAYS * DAY_MS) await fullLogSync();
+
+    const since = String(Date.now() - LOG_WINDOW_DAYS * DAY_MS);
+    const recentLogs = fb.query(fb.collection(db, 'users', uid, 'logs'), fb.where(fb.documentId(), '>=', since));
+    const onError = err => { console.error('[sync]', err); setStatus('error'); };
     unsubscribers = [
-        fb.onSnapshot(fb.collection(db, 'users', uid, 'kv'), onKvSnapshot, err => { console.error('[sync]', err); setStatus('error'); }),
-        fb.onSnapshot(fb.collection(db, 'users', uid, 'logs'), onLogsSnapshot, err => { console.error('[sync]', err); setStatus('error'); })
+        fb.onSnapshot(fb.collection(db, 'users', uid, 'kv'), onKvSnapshot, onError),
+        fb.onSnapshot(recentLogs, snap => mergeRemoteLogs(logDocsToMap(snap), since), onError)
     ];
+    connected = true;
     await flush();
 }
 
-function onSignedOut() {
+function disconnect() {
+    clearTimeout(retryTimer);
     unsubscribers.forEach(u => u());
     unsubscribers = [];
+    connected = false;
+}
+
+// 登入後的對齊；失敗（多半是離線）就稍後再試，網頁照常可用
+async function connect(user) {
+    disconnect();
+    try {
+        await onSignedIn(user);
+    } catch (err) {
+        console.error('[sync]', err);
+        disconnect();
+        setStatus(navigator.onLine ? 'error' : 'offline');
+        retryTimer = setTimeout(() => { if (auth.currentUser) connect(auth.currentUser); }, 30000);
+    }
+}
+
+function onSignedOut() {
+    disconnect();
     uid = null;
     refreshStatus();
 }
+
+// LINE、Facebook 等 App 內建的瀏覽器：Google 不允許在裡面登入
+const IN_APP_BROWSER = /\bLine\/|FBAN|FBAV|FB_IAB|Instagram|MicroMessenger/i.test(navigator.userAgent);
 
 /* --- 給 script.js 用 --- */
 window.pomodoroSync = {
@@ -252,6 +309,7 @@ window.pomodoroSync = {
             refs.slice(i, i + 400).forEach(r => batch.delete(r));
             await batch.commit();
         }
+        knownRemoteLogs = new Set();
         const meta = readMeta(); meta.dirty = {}; meta.logIds = []; writeMeta(meta);
     }
 };
@@ -279,6 +337,10 @@ async function start() {
     }
 
     signInBtn.onclick = async () => {
+        if (IN_APP_BROWSER) {
+            setStatus('off', '這是 App 內建的瀏覽器，Google 不允許在這裡登入。\n請從右上角選單選「用瀏覽器開啟」（Chrome 或 Safari），再登入一次。');
+            return;
+        }
         const provider = new fb.GoogleAuthProvider();
         try {
             await fb.signInWithPopup(auth, provider);
@@ -298,7 +360,7 @@ async function start() {
 
     fb.getRedirectResult(auth).catch(err => console.error('[sync] 登入失敗', err));
     fb.onAuthStateChanged(auth, user => {
-        if (user) onSignedIn(user).catch(err => { console.error('[sync]', err); setStatus('error'); });
+        if (user) connect(user);
         else onSignedOut();
     });
 }

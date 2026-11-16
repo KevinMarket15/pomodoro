@@ -55,10 +55,45 @@ function toggleModal(show, id = 'helpModal') {
 const STORAGE_KEY_CATS = 'pomodoro_categories_v4';
 const STORAGE_KEY_SCHED = 'pomodoro_schedule_v4';
 const STORAGE_KEY_TIMER = 'pomodoro_timer_v5';
-const STORAGE_KEY_STATS = 'pomodoro_stats_v5';
 const STORAGE_KEY_STATE = 'pomodoro_state_v5'; // 計時狀態，重新整理後可接續
 const STORAGE_KEY_LOG = 'pomodoro_log_v1';     // 時間記錄
-const LOG_KEEP_DAYS = 30;
+const LOG_KEEP_DAYS = 365;
+const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+
+/* 資料檢查：匯入的檔案與雲端來的資料都先過這裡，格式不對的部分直接丟掉 */
+function cleanText(v, max = 200) { return typeof v === 'string' ? v.slice(0, max) : ''; }
+// 顏色只接受 #hex 或 rgb()/rgba()，避免被塞進奇怪的 CSS
+function cleanColor(v) {
+    const m = typeof v === 'string' && v.trim().match(/^(#[0-9a-f]{3,8}|rgba?\([\d\s.,%]+\))(\s|$)/i);
+    return m ? m[1] : '#999999';
+}
+function cleanCategories(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.slice(0, 100).filter(c => c && typeof c === 'object').map(c => ({
+        title: cleanText(c.title, 100) || '未命名',
+        color: cleanColor(c.color),
+        tasks: (Array.isArray(c.tasks) ? c.tasks : []).slice(0, 300).map(t => cleanText(t)).filter(Boolean)
+    }));
+}
+function cleanSchedule(raw) {
+    if (!Array.isArray(raw)) return [];
+    return raw.slice(0, 500).filter(t => t && typeof t === 'object' && cleanText(t.name))
+        .map(t => ({ name: cleanText(t.name), color: cleanColor(t.color) }));
+}
+const LOG_MODES = ['focus', 'short', 'long'];
+function cleanLog(l) {
+    if (!l || typeof l !== 'object' || !Number.isFinite(l.start) || !LOG_MODES.includes(l.mode)) return null;
+    const num = (v, d = 0) => Number.isFinite(v) && v >= 0 ? v : d;
+    const entry = {
+        start: l.start, end: num(l.end, l.start), mode: l.mode, task: cleanText(l.task),
+        plannedSec: num(l.plannedSec), actualSec: num(l.actualSec), completed: !!l.completed
+    };
+    if (l.countUp) { entry.countUp = true; entry.pomodoros = Math.floor(num(l.pomodoros)); }
+    return entry;
+}
+function readStoredJSON(key) {
+    try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (err) { return null; }
+}
 
 // 會同步到雲端的資料，一律經過這兩個函式寫入，讓同步模組 (sync.js) 知道有變動
 function storeSet(key, value) {
@@ -81,8 +116,8 @@ function downloadFile(filename, text, type) {
 
 window.exportData = function() {
     const data = {
-        categories: JSON.parse(localStorage.getItem(STORAGE_KEY_CATS) || '[]'),
-        schedule: JSON.parse(localStorage.getItem(STORAGE_KEY_SCHED) || '[]'),
+        categories: readStoredJSON(STORAGE_KEY_CATS) || [],
+        schedule: readStoredJSON(STORAGE_KEY_SCHED) || [],
         logs: loadLogs(),
         timestamp: new Date().toISOString()
     };
@@ -92,21 +127,28 @@ window.exportData = function() {
 window.importData = function(input) {
     const file = input.files[0];
     if (!file) return;
+    input.value = ''; // 讓同一個檔案可以再選一次
+    if (file.size > MAX_IMPORT_BYTES) { alert('檔案太大，不是這個網頁匯出的備份檔。'); return; }
     const reader = new FileReader();
     reader.onload = async function(e) {
         try {
             const data = JSON.parse(e.target.result);
-            if (data.categories) storeSet(STORAGE_KEY_CATS, JSON.stringify(data.categories));
-            if (data.schedule) storeSet(STORAGE_KEY_SCHED, JSON.stringify(data.schedule));
-            if (Array.isArray(data.logs)) { // 記錄用合併，避免蓋掉這台裝置自己的記錄
+            if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('format');
+            const hasCats = Array.isArray(data.categories), hasSched = Array.isArray(data.schedule), hasLogs = Array.isArray(data.logs);
+            if (!hasCats && !hasSched && !hasLogs) throw new Error('format');
+            if (hasCats) storeSet(STORAGE_KEY_CATS, JSON.stringify(cleanCategories(data.categories)));
+            if (hasSched) storeSet(STORAGE_KEY_SCHED, JSON.stringify(cleanSchedule(data.schedule)));
+            if (hasLogs) { // 記錄用合併，避免蓋掉這台裝置自己的記錄
                 const logs = loadLogs();
                 const seen = new Set(logs.map(l => `${l.start}|${l.mode}`));
-                data.logs.forEach(l => { if (!seen.has(`${l.start}|${l.mode}`)) logs.push(l); });
+                data.logs.map(cleanLog).filter(Boolean).forEach(l => {
+                    if (!seen.has(`${l.start}|${l.mode}`)) { seen.add(`${l.start}|${l.mode}`); logs.push(l); }
+                });
                 saveLogs(logs);
             }
             if (window.pomodoroSync) await window.pomodoroSync.flush(); // 重新整理前先把匯入的資料傳上雲端
             alert('匯入成功！'); location.reload();
-        } catch (err) { alert('檔案錯誤'); }
+        } catch (err) { alert('檔案格式不對，沒有匯入任何資料。'); }
     };
     reader.readAsText(file);
 };
@@ -128,6 +170,10 @@ let tickTimer = null; let finishTimer = null;
 let session = null;
 let pipWindow = null; // Document Picture-in-Picture 懸浮小視窗（Chrome/Edge）
 let videoPip = null;  // 影片子母畫面懸浮時間（Firefox 等）：{ canvas, video, stream, panel }
+let attentionTimer = null; let attentionOn = false; // 時間到時讓分頁標題閃爍
+let toastTimer = null;
+let wakeLock = null;  // 計時中不讓螢幕自動關閉
+let logCache = { raw: null, logs: [] }; // 時間記錄的解析快取，見 loadLogs
 
 const timeDisplay = document.getElementById('time');
 const startBtn = document.getElementById('startBtn');
@@ -140,13 +186,17 @@ function loadTimerSettings() {
 function saveTimerSettings() { storeSet(STORAGE_KEY_TIMER, JSON.stringify(timerSettings)); }
 
 function todayKey() { return new Date().toLocaleDateString('sv'); } // 本地時區的 YYYY-MM-DD
-function getTodayCount() {
-    try {
-        const stats = JSON.parse(localStorage.getItem(STORAGE_KEY_STATS) || '{}');
-        return stats.date === todayKey() ? (stats.count || 0) : 0;
-    } catch (err) { return 0; }
+// 一筆專注記錄換算成幾顆蕃茄（正數的一段可能換算成好幾顆）
+function pomodorosOf(l) {
+    if (l.mode !== 'focus') return 0;
+    return l.countUp ? (l.pomodoros || 0) : (l.completed ? 1 : 0);
 }
-function setTodayCount(count) { storeSet(STORAGE_KEY_STATS, JSON.stringify({ date: todayKey(), count })); }
+// 今日蕃茄數直接從時間記錄算（以結束時間為準，跨午夜的那顆算在結束的那天）。
+// 記錄是逐筆同步的，兩台裝置各自完成的蕃茄會加總，不會互相覆蓋。
+function getTodayCount() {
+    const today = todayKey();
+    return loadLogs().reduce((sum, l) => sum + (dateKey(l.end) === today ? pomodorosOf(l) : 0), 0);
+}
 
 function formatTime(sec) {
     const m = Math.floor(sec / 60).toString().padStart(2, '0');
@@ -167,8 +217,96 @@ function shownSeconds() { return isCountUp() ? elapsed : timeLeft; }
 function updateDisplay() {
     const text = formatTime(shownSeconds());
     if (document.activeElement !== timeDisplay) timeDisplay.innerText = text;
-    document.title = `${text} - ${modeLabel()}`;
+    document.title = attentionOn ? '🔔 時間到！' : `${text} - ${modeLabel()}`;
     updateFloating();
+}
+
+// 目前這一段的進度 0–1。倒數：已過時間／預計時長；正數專注：距離下一顆蕃茄
+function phaseProgress() {
+    if (isCountUp()) return mode === 'focus' ? (elapsed % timerSettings.focus) / timerSettings.focus : 0;
+    const planned = session && session.plannedSec ? session.plannedSec : timerSettings[mode];
+    return planned > 0 ? Math.min(1, Math.max(0, 1 - timeLeft / planned)) : 0;
+}
+
+/* 時間到的提醒：不再跳出會卡住頁面的對話框，改成畫面上的提示列、分頁標題閃爍與系統通知 */
+function showToast(msg, actionLabel, onAction) {
+    const toast = document.getElementById('toast');
+    document.getElementById('toastMsg').textContent = msg;
+    const btn = document.getElementById('toastAction');
+    btn.style.display = actionLabel ? '' : 'none';
+    btn.textContent = actionLabel || '';
+    btn.onclick = () => { hideToast(); if (onAction) onAction(); };
+    toast.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(hideToast, 15000);
+}
+function hideToast() {
+    clearTimeout(toastTimer);
+    document.getElementById('toast').classList.remove('show');
+}
+
+function startAttention() {
+    stopAttention();
+    attentionOn = true; updateDisplay();
+    attentionTimer = setInterval(() => { attentionOn = !attentionOn; updateDisplay(); }, 1000);
+}
+function stopAttention() {
+    if (!attentionTimer) return;
+    clearInterval(attentionTimer); attentionTimer = null;
+    attentionOn = false; updateDisplay();
+}
+
+const NOTIFY_TAG = 'pomodoro-phase';
+function requestNotifyPermission() {
+    if (!('Notification' in window) || Notification.permission !== 'default') return;
+    try { const p = Notification.requestPermission(); if (p && p.catch) p.catch(() => {}); } catch (err) {}
+}
+async function getSwRegistration() {
+    try { return 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null; }
+    catch (err) { return null; }
+}
+async function notify(body) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    const options = { body, tag: NOTIFY_TAG, renotify: true, icon: 'icons/icon-192.png' };
+    const reg = await getSwRegistration();
+    // 手機瀏覽器只能透過 service worker 發通知
+    if (reg && reg.active) { try { await reg.showNotification('蕃茄鐘', options); return; } catch (err) {} }
+    try {
+        const n = new Notification('蕃茄鐘', options);
+        n.onclick = () => { window.focus(); n.close(); startFromPrompt(); };
+    } catch (err) {}
+}
+async function clearNotifications() {
+    const reg = await getSwRegistration();
+    if (!reg || !reg.getNotifications) return;
+    try { (await reg.getNotifications({ tag: NOTIFY_TAG })).forEach(n => n.close()); } catch (err) {}
+}
+
+// 從提示列或通知按下去：開始已經切好的下一段
+function startFromPrompt() { if (!isRunning) startTimer(); }
+
+function announce(msg) {
+    playTone('alarm');
+    setTimeout(() => playTone('alarm'), 700);
+    setTimeout(() => playTone('alarm'), 1400);
+    showToast(msg, '開始', startFromPrompt);
+    if (document.hidden || !document.hasFocus()) { startAttention(); notify(msg); }
+}
+
+async function updateWakeLock() {
+    if (!('wakeLock' in navigator)) return;
+    if (isRunning && !document.hidden) {
+        if (wakeLock) return;
+        try {
+            const lock = await navigator.wakeLock.request('screen');
+            if (wakeLock || !isRunning) { lock.release().catch(() => {}); return; }
+            wakeLock = lock;
+            lock.addEventListener('release', () => { if (wakeLock === lock) wakeLock = null; });
+        } catch (err) { /* 省電模式等情況會被拒絕，不影響計時 */ }
+    } else if (wakeLock) {
+        const lock = wakeLock; wakeLock = null;
+        lock.release().catch(() => {});
+    }
 }
 
 function updateModeUI() {
@@ -254,6 +392,7 @@ function startTimer() {
     setStartBtn('pause');
     updateCurrentTask();
     saveTimerState();
+    hideToast(); stopAttention(); clearNotifications(); updateWakeLock();
 }
 
 function stopTimer() {
@@ -269,6 +408,7 @@ function stopTimer() {
     }
     isRunning = false;
     clearInterval(tickTimer); clearTimeout(finishTimer);
+    updateWakeLock();
 }
 
 // 結束目前這一段並寫入記錄；completed = false 表示中途被重置、跳過或切換
@@ -319,11 +459,10 @@ function finishCountUp() {
         earned = Math.floor(session.activeMs / 1000 / timerSettings.focus);
         session.pomodoros = earned;
     }
-    endSession(true);
+    endSession(true); // 寫入記錄後，今日蕃茄數就會包含這次的
     let next = 'focus';
     if (mode === 'focus') {
         const after = before + earned;
-        if (earned) setTodayCount(after);
         // 這次跨過 4 的倍數就進長休息
         next = earned && Math.floor(after / LONG_BREAK_EVERY) > Math.floor(before / LONG_BREAK_EVERY) ? 'long' : 'short';
     }
@@ -334,9 +473,8 @@ function finishCountUp() {
 function advancePhase(completed) {
     let next = 'focus';
     if (mode === 'focus') {
-        let count = getTodayCount();
-        if (completed) setTodayCount(++count);
-        next = (completed && count % LONG_BREAK_EVERY === 0) ? 'long' : 'short';
+        const count = getTodayCount(); // 自然結束時，剛完成的這顆已經寫入記錄
+        next = (completed && count > 0 && count % LONG_BREAK_EVERY === 0) ? 'long' : 'short';
     }
     switchMode(next);
 }
@@ -344,19 +482,10 @@ function advancePhase(completed) {
 function finishPhase() {
     const finished = mode;
     stopTimer(); endSession(true);
-    playTone('alarm'); // 1. 先觸發音效
-    advancePhase(true);
-    // 懸浮中不跳 alert：alert 會卡住整個頁面，小視窗也會停止更新。改成多響兩聲提醒
-    if (pipWindow || videoPip) {
-        setTimeout(() => playTone('alarm'), 700);
-        setTimeout(() => playTone('alarm'), 1400);
-        return;
-    }
-    const msg = finished === 'focus'
+    advancePhase(true); // 切到下一段，停在那裡等使用者按開始
+    announce(finished === 'focus'
         ? `專注結束！接下來是${MODE_LABELS[mode]}（${formatTime(timeLeft)}）`
-        : '休息結束，準備開始下一顆蕃茄！';
-    // 2. 延遲 50 毫秒再跳出彈窗，確保音效在網頁被 alert 凍結前能順利播出來
-    setTimeout(() => alert(msg), 50);
+        : '休息結束，準備開始下一顆蕃茄！');
 }
 
 window.setTimer = function(minutes) {
@@ -394,9 +523,13 @@ timeDisplay.addEventListener('blur', () => {
 
 startBtn.addEventListener('click', () => {
     playTone('click');
+    requestNotifyPermission(); // 第一次按開始時詢問是否允許通知（瀏覽器規定要由點擊觸發）
+    toggleTimer();
+});
+function toggleTimer() {
     if (isRunning) { stopTimer(); setStartBtn('resume'); updateDisplay(); saveTimerState(); }
     else startTimer();
-});
+}
 document.getElementById('resetBtn').addEventListener('click', () => {
     playTone('click'); stopTimer(); endSession(false);
     timeLeft = timerSettings[mode];
@@ -414,7 +547,21 @@ document.querySelectorAll('.mode-btn').forEach(btn => btn.addEventListener('clic
 document.querySelectorAll('.count-btn').forEach(btn => btn.addEventListener('click', () => {
     playTone('click'); setCountUp(btn.dataset.count === 'up');
 }));
-document.addEventListener('visibilitychange', tick); // 切回分頁時立即校正畫面
+document.addEventListener('visibilitychange', () => {
+    tick(); // 切回分頁時立即校正畫面
+    if (!document.hidden) stopAttention();
+    updateWakeLock(); // 分頁到背景時螢幕鎖會被系統收回，回來時重新取得
+});
+window.addEventListener('focus', stopAttention);
+document.addEventListener('pointerdown', stopAttention);
+document.getElementById('toastClose').addEventListener('click', hideToast);
+if ('serviceWorker' in navigator) {
+    // 點了系統通知：service worker 會把視窗叫到前面，再通知這裡開始下一段
+    navigator.serviceWorker.addEventListener('message', (e) => {
+        if (e.data && e.data.type === 'notification-click') startFromPrompt();
+    });
+    if (location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
+}
 
 // 重新整理或重開頁面後接續上次的計時
 function restoreTimerState() {
@@ -449,7 +596,7 @@ function saveCategories() {
 function saveSchedule() {
     const schedule = [];
     document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
-        schedule.push({ name: card.querySelector('.task-name').innerText, color: card.querySelector('.tag').style.background });
+        schedule.push({ name: card.querySelector('.task-name').innerText, color: card.dataset.color || card.querySelector('.tag').style.background });
     });
     storeSet(STORAGE_KEY_SCHED, JSON.stringify(schedule));
     updateCurrentTask();
@@ -466,16 +613,15 @@ function initApp() {
 
 function renderScheduleFromStorage() {
     document.getElementById('scheduleSlot').innerHTML = '';
-    const savedSchedule = localStorage.getItem(STORAGE_KEY_SCHED);
-    if (savedSchedule) JSON.parse(savedSchedule).forEach(t => addToSchedule(t.name, t.color, false));
+    cleanSchedule(readStoredJSON(STORAGE_KEY_SCHED)).forEach(t => appendScheduleCard(t.name, t.color));
     updateCurrentTask();
 }
 
 function renderCategoriesFromStorage() {
     paletteContainer.querySelectorAll('.category-group').forEach(g => g.remove());
-    const savedCats = localStorage.getItem(STORAGE_KEY_CATS);
-    if (savedCats) {
-        JSON.parse(savedCats).forEach(cat => createCategoryDOM(cat.title, cat.color, cat.tasks));
+    const savedCats = readStoredJSON(STORAGE_KEY_CATS);
+    if (Array.isArray(savedCats)) {
+        cleanCategories(savedCats).forEach(cat => createCategoryDOM(cat.title, cat.color, cat.tasks));
     } else {
         createCategoryDOM('工作', '#ff6b6b', ['寫代碼']);
         createCategoryDOM('健康', '#1dd1a1', ['喝水']);
@@ -779,6 +925,12 @@ function getSlotInsertBefore(x, y, exclude) {
 
 function addToSchedule(name, color, sound = true, before = null) {
     if(sound) playTone('drop');
+    appendScheduleCard(name, color, before);
+    saveSchedule();
+}
+
+// 只建立卡片、不存檔（從儲存的資料重畫時用，避免把剛收到的雲端資料又當成本機修改傳回去）
+function appendScheduleCard(name, color, before = null) {
     const div = document.createElement('div');
     div.className = 'task-card';
     div.dataset.color = color;
@@ -791,23 +943,27 @@ function addToSchedule(name, color, sound = true, before = null) {
     const text = document.createElement('div'); text.className = 'task-name'; text.innerText = name;
 
     div.appendChild(delBtn); div.appendChild(tag); div.appendChild(text);
-    slot.insertBefore(div, before); saveSchedule();
+    slot.insertBefore(div, before);
 }
 
 window.clearSchedule = function() { if(confirm('清空今日行程？')) { playTone('click'); slot.innerHTML = ''; saveSchedule(); } };
 
 /* --- 6. 時間記錄與匯出 --- */
+// 記錄一年可能有幾千筆，解析結果快取起來（logCache），內容沒變就不重新解析
 function loadLogs() {
-    try {
-        const logs = JSON.parse(localStorage.getItem(STORAGE_KEY_LOG) || '[]');
-        return Array.isArray(logs) ? logs : [];
-    } catch (err) { return []; }
+    const raw = localStorage.getItem(STORAGE_KEY_LOG);
+    if (raw !== logCache.raw) {
+        let logs = [];
+        try { const parsed = JSON.parse(raw || '[]'); if (Array.isArray(parsed)) logs = parsed.map(cleanLog).filter(Boolean); } catch (err) {}
+        logCache = { raw, logs };
+    }
+    return logCache.logs.slice();
 }
 
 // 儲存時順便刪掉超過保留天數的記錄
 function saveLogs(logs) {
     const cutoff = Date.now() - LOG_KEEP_DAYS * 24 * 60 * 60 * 1000;
-    const kept = logs.filter(l => l.start >= cutoff).sort((a, b) => a.start - b.start);
+    const kept = logs.map(cleanLog).filter(l => l && l.start >= cutoff).sort((a, b) => a.start - b.start);
     storeSet(STORAGE_KEY_LOG, JSON.stringify(kept));
 }
 
@@ -851,8 +1007,7 @@ function summarizeLogs(logs) {
     return {
         focusSec: focus.reduce((sum, l) => sum + l.actualSec, 0),
         breakSec: logs.filter(l => l.mode !== 'focus').reduce((sum, l) => sum + l.actualSec, 0),
-        // 正數的一段可能換算成好幾顆
-        done: focus.reduce((sum, l) => sum + (l.countUp ? (l.pomodoros || 0) : (l.completed ? 1 : 0)), 0),
+        done: focus.reduce((sum, l) => sum + pomodorosOf(l), 0),
         byTask
     };
 }
@@ -970,10 +1125,11 @@ window.copyLog = async function() {
 };
 
 window.clearLogs = function() {
-    if (!confirm(`清除所有時間記錄（含過去 ${LOG_KEEP_DAYS} 天）？此動作無法復原。`)) return;
+    if (!confirm('清除所有時間記錄（含過去一年）？今日蕃茄數也會歸零，此動作無法復原。')) return;
     storeRemove(STORAGE_KEY_LOG);
     playTone('delete');
     renderLogModal();
+    updateModeUI();
 };
 
 saveLogs(loadLogs()); // 開啟時清掉過期記錄
@@ -1009,6 +1165,7 @@ function updateFloating() {
         doc.querySelector('.mini-time').textContent = formatTime(shownSeconds());
         doc.querySelector('[data-act="start"]').textContent = startBtn.textContent;
         doc.querySelector('[data-act="skip"]').textContent = document.getElementById('skipBtn').textContent;
+        doc.querySelector('.mini-progress-fill').style.width = `${phaseProgress() * 100}%`;
     }
     if (videoPip) drawPipCanvas();
 }
@@ -1024,7 +1181,7 @@ window.openFloating = async function() {
 
 // Chrome/Edge：可以放按鈕的置頂小視窗
 async function openDocPip() {
-    pipWindow = await documentPictureInPicture.requestWindow({ width: 260, height: 170 });
+    pipWindow = await documentPictureInPicture.requestWindow({ width: 260, height: 185 });
     const doc = pipWindow.document;
     // 把主頁的樣式複製過去；直接開本機檔案時讀不到規則，改用連結載入
     [...document.styleSheets].forEach(sheet => {
@@ -1044,6 +1201,7 @@ async function openDocPip() {
         <div class="mini">
             <div class="mini-top"><span class="mini-mode"></span><span class="mini-task"></span></div>
             <div class="mini-time"></div>
+            <div class="mini-progress"><div class="mini-progress-fill"></div></div>
             <div class="mini-controls">
                 <button class="mini-btn" data-act="start"></button>
                 <button class="mini-btn" data-act="skip">跳過</button>
@@ -1056,7 +1214,8 @@ async function openDocPip() {
     updateFloating();
 }
 
-// 其他瀏覽器：把時間畫到 canvas，轉成影片後用子母畫面顯示（只能看，不能按）
+// 其他瀏覽器：把時間畫到 canvas，轉成影片後用子母畫面顯示。
+// 子母畫面上只有影片的播放／暫停鍵可以按，所以把它當成「開始／暫停計時」的開關
 async function openVideoPip() {
     if (!videoPip) {
         const canvas = document.createElement('canvas');
@@ -1067,20 +1226,28 @@ async function openVideoPip() {
             <button class="modal-close" title="關閉懸浮時間">×</button>
             <div class="vp-hint">
                 把滑鼠移到下方畫面上，按右側出現的「子母畫面」按鈕（或按 <b>Ctrl+Shift+]</b>），時間就會浮在所有視窗上方。<br>
+                小視窗上的<b>暫停鍵</b>可以開始／暫停計時。<br>
                 這個面板要留著，關掉會一起關閉懸浮時間。
             </div>`;
         const video = document.createElement('video');
-        video.muted = true; video.playsInline = true; video.autoplay = true;
+        video.muted = true; video.playsInline = true;
         panel.appendChild(video);
         document.body.appendChild(panel);
         panel.querySelector('.modal-close').onclick = () => closeVideoPip();
 
-        videoPip = { canvas, video, panel, stream: null };
+        videoPip = { canvas, video, panel, stream: null, openedAt: Date.now() };
         drawPipCanvas(); // 先畫一張，串流才有畫面
         videoPip.stream = canvas.captureStream();
         video.srcObject = videoPip.stream;
-        // 子母畫面裡的暫停鍵不控制計時；被暫停就繼續播放，避免時間停住
-        video.addEventListener('pause', () => { if (videoPip) video.play().catch(() => {}); });
+        // 影片要一直播放畫面才會更新，所以被按了暫停就馬上繼續播，並把這一下當成「開始／暫停計時」
+        video.addEventListener('pause', () => {
+            const vp = videoPip;
+            if (!vp || vp.video !== video) return;
+            video.play().catch(() => {});
+            if (Date.now() - vp.openedAt > 1000) toggleTimer(); // 剛開啟時瀏覽器自己觸發的暫停不算
+        });
+        // Chrome／Safari 的子母畫面會改走 Media Session 的按鍵
+        setMediaSessionHandlers({ play: toggleTimer, pause: toggleTimer, nexttrack: () => document.getElementById('skipBtn').click() });
         // 用 API 開的子母畫面被關掉時，一併收掉
         video.addEventListener('leavepictureinpicture', () => {
             if (videoPip && !videoPip.panel.classList.contains('show')) closeVideoPip();
@@ -1102,8 +1269,24 @@ window.closeVideoPip = function() {
     if (document.pictureInPictureElement === vp.video) document.exitPictureInPicture().catch(() => {});
     vp.stream.getTracks().forEach(t => t.stop());
     vp.panel.remove();
+    setMediaSessionHandlers({ play: null, pause: null, nexttrack: null });
     stopFloatingTicker();
 };
+
+function setMediaSessionHandlers(handlers) {
+    if (!('mediaSession' in navigator)) return;
+    Object.entries(handlers).forEach(([action, fn]) => {
+        try { navigator.mediaSession.setActionHandler(action, fn); } catch (err) {}
+    });
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+}
 
 // 文字太長時截斷並加上「…」
 function fitText(ctx, text, maxWidth) {
@@ -1125,18 +1308,24 @@ function drawPipCanvas() {
 
     const task = currentTaskName();
     ctx.font = `bold 36px ${font}`; ctx.fillStyle = accent;
-    ctx.fillText(fitText(ctx, task ? `${modeLabel()} · ${task}` : modeLabel(), W - 60), W / 2, 70);
+    ctx.fillText(fitText(ctx, task ? `${modeLabel()} · ${task}` : modeLabel(), W - 60), W / 2, 62);
 
-    ctx.font = `300 170px ${font}`; ctx.fillStyle = '#4a4a4a';
-    ctx.fillText(formatTime(shownSeconds()), W / 2, 195);
+    ctx.font = `300 160px ${font}`; ctx.fillStyle = '#4a4a4a';
+    ctx.fillText(formatTime(shownSeconds()), W / 2, 172);
 
-    ctx.font = `30px ${font}`; ctx.fillStyle = '#888';
-    ctx.fillText(isRunning ? '▶ 計時中' : (session ? '⏸ 已暫停' : '等待開始'), W / 2, 315);
+    // 進度條
+    const barX = 60, barY = 262, barW = W - 120, barH = 14;
+    ctx.fillStyle = '#c9d1db'; roundRect(ctx, barX, barY, barW, barH, barH / 2); ctx.fill();
+    const fillW = barW * phaseProgress();
+    if (fillW >= barH) { ctx.fillStyle = accent; roundRect(ctx, barX, barY, fillW, barH, barH / 2); ctx.fill(); }
+
+    ctx.font = `28px ${font}`; ctx.fillStyle = '#777';
+    ctx.fillText(isRunning ? '計時中 · 按暫停鍵可暫停' : (session ? '已暫停 · 按暫停鍵繼續' : '按暫停鍵開始'), W / 2, 318);
 }
 
 /* --- 8. 給同步模組 (sync.js) 用的介面 --- */
 window.pomodoroApp = {
-    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, stats: STORAGE_KEY_STATS, logs: STORAGE_KEY_LOG },
+    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, logs: STORAGE_KEY_LOG },
     loadLogs, saveLogs,
 
     // 預設類別還沒存過時先存起來，才有東西可以上傳
@@ -1151,8 +1340,8 @@ window.pomodoroApp = {
         }
         if (key === STORAGE_KEY_CATS) renderCategoriesFromStorage();
         else if (key === STORAGE_KEY_SCHED) renderScheduleFromStorage();
-        else if (key === STORAGE_KEY_STATS) updateModeUI();
         else if (key === STORAGE_KEY_LOG) {
+            updateModeUI(); // 今日蕃茄數是從記錄算的
             if (document.getElementById('logModal').classList.contains('show')) renderLogModal();
         } else if (key === STORAGE_KEY_TIMER) {
             const incoming = loadTimerSettings();
@@ -1163,5 +1352,39 @@ window.pomodoroApp = {
         }
     }
 };
+
+/* --- 9. 按鈕綁定 ---
+ * HTML 裡不寫 onclick：這樣內容安全政策才能禁止所有寫在網頁裡的程式碼，只執行這幾個檔案。 */
+const ACTIONS = {
+    'open-help': () => toggleModal(true),
+    'open-sync': () => toggleModal(true, 'syncModal'),
+    'open-float': () => openFloating(),
+    'open-log': () => openLogModal(),
+    'export-data': () => exportData(),
+    'import-data': () => document.getElementById('importFile').click(),
+    'log-prev': () => shiftLogDate(-1),
+    'log-next': () => shiftLogDate(1),
+    'export-csv': () => exportLog('csv'),
+    'export-md': () => exportLog('md'),
+    'copy-log': () => copyLog(),
+    'export-all': () => exportAllLogs(),
+    'clear-logs': () => clearLogs(),
+    'clear-schedule': () => clearSchedule(),
+    'reset-all': () => resetToDefault(),
+    'add-category': () => addNewCategory()
+};
+document.querySelectorAll('[data-action]').forEach(el => {
+    el.addEventListener('click', () => ACTIONS[el.dataset.action]());
+});
+document.querySelectorAll('.preset-btn').forEach(btn => {
+    btn.addEventListener('click', () => setTimer(Number(btn.dataset.min)));
+});
+document.getElementById('importFile').addEventListener('change', (e) => importData(e.target));
+// 點視窗外面或右上角 × 關閉
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+    overlay.addEventListener('click', (e) => {
+        if (e.target === overlay || e.target.closest('.modal-close')) toggleModal(false, overlay.id);
+    });
+});
 
 window.addEventListener('DOMContentLoaded', initApp);

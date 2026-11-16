@@ -263,3 +263,23 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
     .timer-display { font-size: 20vw; }
     .groove-track { flex-direction: row; flex-wrap: wrap; justify-content: flex-start; align-content: flex-start;}
 }
+/* --- 時間到的提示列 --- */
+.toast {
+    position: fixed; top: 16px; left: 50%; transform: translate(-50%, -150%);
+    display: flex; align-items: center; gap: 12px; z-index: 3000;
+    max-width: calc(100vw - 32px); padding: 12px 14px 12px 20px; border-radius: 18px;
+    background: var(--bg-color); color: var(--text-color);
+    box-shadow: var(--outer-shadow), 0 0 0 2px var(--accent-color);
+    transition: transform 0.3s ease; visibility: hidden;
+}
+.toast.show { transform: translate(-50%, 0); visibility: visible; }
+.toast-msg { font-size: 0.95rem; line-height: 1.4; }
+.toast-action {
+    border: none; border-radius: 12px; padding: 8px 16px; cursor: pointer; flex-shrink: 0;
+    background: var(--accent-color); color: #fff; font-weight: bold; font-size: 0.95rem;
+}
+.toast-close { border: none; background: transparent; color: #999; font-size: 1.3rem; cursor: pointer; flex-shrink: 0; line-height: 1; }
+
+/* --- 懸浮小視窗的進度條 --- */
+.mini-progress { height: 5px; margin: 2px 8px 0; border-radius: 3px; background: rgba(0, 0, 0, 0.1); overflow: hidden; }
+.mini-progress-fill { height: 100%; width: 0; border-radius: 3px; background: var(--accent-color); transition: width 0.4s linear; }

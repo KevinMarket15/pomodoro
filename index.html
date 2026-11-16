@@ -3,23 +3,38 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>極簡番茄鐘排程器 v5.1</title>
+    <!-- 內容安全政策：只允許載入自己和 Google（Firebase）的程式，資料也只能送往這些地方 -->
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob: mediastream:; connect-src 'self' https://*.googleapis.com https://www.gstatic.com https://*.firebaseapp.com; frame-src https://*.firebaseapp.com; worker-src 'self' blob:; manifest-src 'self'; base-uri 'self'; form-action 'none'; object-src 'none'">
+    <title>蕃茄鐘排程器</title>
+    <meta name="theme-color" content="#e0e5ec">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="icon" href="icons/icon-192.png">
+    <link rel="apple-touch-icon" href="icons/icon-180.png">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-title" content="蕃茄鐘">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-<button class="help-fab" onclick="toggleModal(true)">?</button>
-<button class="help-fab float-fab" onclick="openFloating()" title="懸浮小視窗">⧉</button>
-<button class="help-fab sync-fab" id="syncFab" onclick="toggleModal(true, 'syncModal')" title="雲端同步" style="display:none" data-state="off">☁<span class="sync-dot"></span></button>
+<button class="help-fab" data-action="open-help">?</button>
+<button class="help-fab float-fab" data-action="open-float" title="懸浮小視窗">⧉</button>
+<button class="help-fab sync-fab" id="syncFab" data-action="open-sync" title="雲端同步" style="display:none" data-state="off">☁<span class="sync-dot"></span></button>
 
-<div class="modal-overlay" id="syncModal" onclick="toggleModal(false, 'syncModal')">
-    <div class="modal-content" onclick="event.stopPropagation()">
-        <button class="modal-close" onclick="toggleModal(false, 'syncModal')">×</button>
+<div class="toast" id="toast" role="status" aria-live="polite">
+    <span class="toast-msg" id="toastMsg"></span>
+    <button class="toast-action" id="toastAction"></button>
+    <button class="toast-close" id="toastClose" title="關閉">×</button>
+</div>
+
+<div class="modal-overlay" id="syncModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
         <div class="modal-section">
             <div class="modal-title">雲端同步</div>
             <div class="sync-status" id="syncStatus">尚未登入</div>
             <ul class="modal-list">
-                <li>用 Google 帳號登入後，登入同一帳號的手機與電腦會自動同步：任務庫、今日行程、時間記錄、今日蕃茄數與時長設定。</li>
+                <li>用 Google 帳號登入後，登入同一帳號的手機與電腦會自動同步：任務庫、今日行程、時間記錄（含今日蕃茄數）與時長設定。</li>
                 <li>正在進行的計時不會同步，各裝置自己計時。</li>
                 <li>離線時照常使用，恢復連線後會自動上傳。</li>
             </ul>
@@ -31,21 +46,23 @@
     </div>
 </div>
 
-<div class="modal-overlay" id="helpModal" onclick="toggleModal(false)">
-    <div class="modal-content" onclick="event.stopPropagation()">
-        <button class="modal-close" onclick="toggleModal(false)">×</button>
+<div class="modal-overlay" id="helpModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
         <div class="modal-section">
             <div class="modal-title">使用說明</div>
             <ul class="modal-list">
-                <li><strong>專注／休息循環：</strong>專注結束後自動切到短休息，每完成 4 顆蕃茄改為長休息。「跳過」直接進入下一段（不計入完成數）。</li>
+                <li><strong>專注／休息循環：</strong>專注結束後自動切到短休息，每完成 4 顆蕃茄改為長休息，切好後會停在那裡等你按「開始」。「跳過」直接進入下一段（不計入完成數）。</li>
+                <li><strong>時間到的提醒：</strong>會響三聲，並在畫面上方出現提示列。第一次按「開始」時瀏覽器會問要不要允許通知；允許之後，分頁在背景時也會跳出系統通知，點通知就開始下一段。</li>
                 <li><strong>倒數／正數：</strong>上方第二排切換。正數從 00:00 往上數（專注時稱為「自由專注」），想停時按「結束」：專注每滿一段專注時長（預設 25 分鐘）算一顆蕃茄，然後自動切到休息。</li>
                 <li><strong>時長設定：</strong>數字按鈕或直接點擊時間輸入，會設定「目前模式」的時長並記住。</li>
                 <li><strong>排入行程：</strong>把任務庫的任務拖進中間凹槽。手機請先<strong>長按</strong>任務一下再拖。</li>
                 <li><strong>調整行程：</strong>凹槽內的任務可拖曳調整順序；拖到外面放開或按 Esc 會回到原位，要移除請按右上角 ✕。</li>
                 <li><strong>排序類別：</strong>按住類別標題右側的 ☰ 圖示上下拖曳。</li>
                 <li><strong>目前任務：</strong>凹槽最上面的任務就是目前任務（以按下開始時為準）。要換任務，把它拖到最上面。</li>
-                <li><strong>今日記錄：</strong>每段專注與休息結束後會自動記錄時間、任務與實際時長（中途結束的標示「中斷」）。按凹槽下方「時間記錄」查看，用 ‹ › 切換到過去有記錄的日子；可匯出當天的 CSV（試算表）或 Markdown（筆記），或一次匯出全部 30 天的 CSV。</li>
-                <li><strong>懸浮小視窗：</strong>按右上角 ⧉。Chrome／Edge 會開出可操作的置頂小視窗；Firefox 會在右下角出現預覽畫面，再按畫面上的「子母畫面」按鈕（或 Ctrl+Shift+]）讓時間浮在最上層（只能看，不能按）。</li>
+                <li><strong>時間記錄：</strong>每段專注與休息結束後會自動記錄時間、任務與實際時長（中途結束的標示「中斷」），保留一年。按凹槽下方「時間記錄」查看，用 ‹ › 切換到過去有記錄的日子；可匯出當天的 CSV（試算表）或 Markdown（筆記），或一次匯出全部記錄的 CSV。</li>
+                <li><strong>懸浮小視窗：</strong>按右上角 ⧉。Chrome／Edge 會開出可操作的置頂小視窗；Firefox 會在右下角出現預覽畫面，再按畫面上的「子母畫面」按鈕（或 Ctrl+Shift+]）讓時間浮在最上層，小視窗上的暫停鍵可以開始／暫停計時。</li>
+                <li><strong>安裝成 App：</strong>手機用瀏覽器選單的「加到主畫面」或「安裝應用程式」，之後可以全螢幕開啟，沒有網路也能用。計時中螢幕不會自動關閉。</li>
                 <li><strong>雲端同步：</strong>按右上角 ☁ 用 Google 登入，手機與電腦登入同一帳號就會自動同步任務庫、行程、記錄與設定。</li>
                 <li><strong>編輯任務：</strong>點一下任務改名，名稱清空即刪除（電腦也可按右鍵刪除）。</li>
             </ul>
@@ -53,44 +70,44 @@
         <div class="modal-section">
             <div class="modal-title">資料備份</div>
             <div class="data-actions">
-                <button class="action-btn export" onclick="exportData()">⬇ 匯出</button>
-                <button class="action-btn" onclick="document.getElementById('importFile').click()">⬆ 匯入</button>
-                <input type="file" id="importFile" style="display:none" accept=".json" onchange="importData(this)">
+                <button class="action-btn export" data-action="export-data">⬇ 匯出</button>
+                <button class="action-btn" data-action="import-data">⬆ 匯入</button>
+                <input type="file" id="importFile" style="display:none" accept=".json">
             </div>
         </div>
     </div>
 </div>
 
-<div class="modal-overlay" id="logModal" onclick="toggleModal(false, 'logModal')">
-    <div class="modal-content" onclick="event.stopPropagation()">
-        <button class="modal-close" onclick="toggleModal(false, 'logModal')">×</button>
+<div class="modal-overlay" id="logModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
         <div class="modal-section">
             <div class="modal-title log-nav">
-                <button class="log-nav-btn" id="logPrev" onclick="shiftLogDate(-1)" title="前一個有記錄的日子">‹</button>
+                <button class="log-nav-btn" id="logPrev" data-action="log-prev" title="前一個有記錄的日子">‹</button>
                 <span id="logTitle">今日記錄</span>
-                <button class="log-nav-btn" id="logNext" onclick="shiftLogDate(1)" title="下一個有記錄的日子">›</button>
+                <button class="log-nav-btn" id="logNext" data-action="log-next" title="下一個有記錄的日子">›</button>
             </div>
             <div class="log-summary" id="logSummary"></div>
             <div class="log-pending" id="logPending">進行中的這一段，結束後才會寫入記錄。</div>
             <div class="log-table-wrap"><table class="log-table" id="logTable"></table></div>
             <div class="data-actions">
-                <button class="action-btn export" onclick="exportLog('csv')">⬇ CSV</button>
-                <button class="action-btn" onclick="exportLog('md')">⬇ Markdown</button>
-                <button class="action-btn" id="copyLogBtn" onclick="copyLog()">📋 複製</button>
+                <button class="action-btn export" data-action="export-csv">⬇ CSV</button>
+                <button class="action-btn" data-action="export-md">⬇ Markdown</button>
+                <button class="action-btn" id="copyLogBtn" data-action="copy-log">📋 複製</button>
             </div>
             <div class="data-actions">
-                <button class="action-btn" onclick="exportAllLogs()">⬇ 匯出全部 30 天（CSV）</button>
+                <button class="action-btn" data-action="export-all">⬇ 匯出全部記錄（CSV）</button>
             </div>
             <div class="log-footer">
-                記錄保留最近 30 天，存在這台裝置的瀏覽器中；登入雲端同步後也會同步到其他裝置。
-                <span class="log-clear" onclick="clearLogs()">清除所有記錄</span>
+                記錄保留最近一年，存在這台裝置的瀏覽器中；登入雲端同步後也會同步到其他裝置。
+                <span class="log-clear" data-action="clear-logs">清除所有記錄</span>
             </div>
         </div>
     </div>
 </div>
 
 <main class="app-container">
-    
+
     <section class="timer-zone">
         <div class="mode-row">
             <button class="mode-btn active" data-mode="focus">專注</button>
@@ -104,12 +121,12 @@
         </div>
 
         <div class="preset-row">
-            <button class="preset-btn" onclick="setTimer(5)">5</button>
-            <button class="preset-btn" onclick="setTimer(10)">10</button>
-            <button class="preset-btn" onclick="setTimer(15)">15</button>
-            <button class="preset-btn" onclick="setTimer(20)">20</button>
-            <button class="preset-btn" onclick="setTimer(25)">25</button>
-            <button class="preset-btn" onclick="setTimer(30)">30</button>
+            <button class="preset-btn" data-min="5">5</button>
+            <button class="preset-btn" data-min="10">10</button>
+            <button class="preset-btn" data-min="15">15</button>
+            <button class="preset-btn" data-min="20">20</button>
+            <button class="preset-btn" data-min="25">25</button>
+            <button class="preset-btn" data-min="30">30</button>
         </div>
 
         <div class="timer-display" id="time" contenteditable="true">25:00</div>
@@ -132,17 +149,17 @@
         <div class="groove-header">今日行程</div>
         <div class="groove-track" id="scheduleSlot"></div>
         <div class="groove-actions">
-            <button class="clear-btn" onclick="clearSchedule()">清空行程</button>
-            <button class="clear-btn log-btn" onclick="openLogModal()">時間記錄</button>
+            <button class="clear-btn" data-action="clear-schedule">清空行程</button>
+            <button class="clear-btn log-btn" data-action="open-log">時間記錄</button>
         </div>
     </div>
 
     <aside class="task-palette" id="paletteContainer">
         <h3 class="palette-header">
-            任務庫 
-            <span class="reset-all-icon" onclick="resetToDefault()" title="重置回預設值">↺</span>
+            任務庫
+            <span class="reset-all-icon" data-action="reset-all" title="重置回預設值">↺</span>
         </h3>
-        <button class="add-category-main-btn" onclick="addNewCategory()">+ 新增類別</button>
+        <button class="add-category-main-btn" data-action="add-category">+ 新增類別</button>
     </aside>
 
 </main>
