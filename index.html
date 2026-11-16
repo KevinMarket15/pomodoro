@@ -17,9 +17,17 @@
 </head>
 <body>
 
-<button class="help-fab" data-action="open-help">?</button>
-<button class="help-fab float-fab" data-action="open-float" title="懸浮小視窗">⧉</button>
-<button class="help-fab sync-fab" id="syncFab" data-action="open-sync" title="雲端同步" style="display:none" data-state="off">☁<span class="sync-dot"></span></button>
+<!-- 右上角按鈕列：電腦攤開成一排，手機收成一個 ☰ 選單 -->
+<div class="fab-bar" id="fabBar">
+    <button class="help-fab fab-toggle" id="fabToggle" title="選單" aria-label="選單">☰</button>
+    <div class="fab-items">
+        <button class="help-fab" data-action="open-help" title="使用說明"><span class="fab-icon">?</span><span class="fab-label">使用說明</span></button>
+        <button class="help-fab" data-action="open-settings" title="設定"><span class="fab-icon">⚙</span><span class="fab-label">設定</span></button>
+        <button class="help-fab" data-action="open-stats" title="每週統計"><span class="fab-icon">📊</span><span class="fab-label">每週統計</span></button>
+        <button class="help-fab float-fab" data-action="open-float" title="懸浮小視窗"><span class="fab-icon">⧉</span><span class="fab-label">懸浮小視窗</span></button>
+        <button class="help-fab sync-fab" id="syncFab" data-action="open-sync" title="雲端同步" style="display:none" data-state="off"><span class="fab-icon">☁</span><span class="fab-label">雲端同步</span><span class="sync-dot"></span></button>
+    </div>
+</div>
 
 <div class="toast" id="toast" role="status" aria-live="polite">
     <span class="toast-msg" id="toastMsg"></span>
@@ -46,6 +54,75 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="settingsModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title">設定</div>
+            <div class="setting-row">
+                <span class="setting-label">外觀</span>
+                <div class="seg" id="setTheme">
+                    <button class="seg-btn" data-value="auto">跟隨系統</button>
+                    <button class="seg-btn" data-value="light">淺色</button>
+                    <button class="seg-btn" data-value="dark">深色</button>
+                </div>
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">提示音</span>
+                <div class="seg" id="setVolume">
+                    <button class="seg-btn" data-value="0">靜音</button>
+                    <button class="seg-btn" data-value="0.35">小聲</button>
+                    <button class="seg-btn" data-value="1">正常</button>
+                </div>
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">幾顆蕃茄後長休息</span>
+                <div class="stepper">
+                    <button class="seg-btn" id="setLongMinus" aria-label="減少">−</button>
+                    <span id="setLongValue">4</span>
+                    <button class="seg-btn" id="setLongPlus" aria-label="增加">＋</button>
+                </div>
+            </div>
+            <label class="setting-row">
+                <span class="setting-label">結束後自動開始下一段<small>關閉時會停住，等你按「開始」</small></span>
+                <input type="checkbox" class="switch" id="setAutoStart">
+            </label>
+            <label class="setting-row">
+                <span class="setting-label">計時中顯示常駐通知<small>顯示結束時間，需要先允許通知</small></span>
+                <input type="checkbox" class="switch" id="setStatusNotify">
+            </label>
+            <div class="setting-note">外觀、提示音與常駐通知只影響這台裝置；其餘設定會同步到其他裝置。</div>
+        </div>
+        <div class="modal-section">
+            <div class="modal-title">鍵盤快捷鍵</div>
+            <ul class="modal-list">
+                <li><strong>空白鍵：</strong>開始／暫停</li>
+                <li><strong>S：</strong>跳過（正數時為結束）</li>
+                <li><strong>R：</strong>重置</li>
+            </ul>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="statsModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title log-nav">
+                <button class="log-nav-btn" id="statsPrev" data-action="stats-prev" title="前一週">‹</button>
+                <span id="statsTitle">每週統計</span>
+                <button class="log-nav-btn" id="statsNext" data-action="stats-next" title="後一週">›</button>
+            </div>
+            <div class="log-summary" id="statsSummary"></div>
+            <div class="stats-chart" id="statsChart"></div>
+            <div class="stats-heading">各任務專注時間</div>
+            <div class="stats-list" id="statsTasks"></div>
+            <div class="stats-heading">各類別專注時間</div>
+            <div class="stats-list" id="statsCats"></div>
+        </div>
+    </div>
+</div>
+
 <div class="modal-overlay" id="helpModal">
     <div class="modal-content">
         <button class="modal-close">×</button>
@@ -56,15 +133,18 @@
                 <li><strong>時間到的提醒：</strong>會響三聲，並在畫面上方出現提示列。第一次按「開始」時瀏覽器會問要不要允許通知；允許之後，分頁在背景時也會跳出系統通知，點通知就開始下一段。</li>
                 <li><strong>倒數／正數：</strong>上方第二排切換。正數從 00:00 往上數（專注時稱為「自由專注」），想停時按「結束」：專注每滿一段專注時長（預設 25 分鐘）算一顆蕃茄，然後自動切到休息。</li>
                 <li><strong>時長設定：</strong>數字按鈕或直接點擊時間輸入，會設定「目前模式」的時長並記住。</li>
-                <li><strong>排入行程：</strong>把任務庫的任務拖進中間凹槽。手機請先<strong>長按</strong>任務一下再拖。</li>
+                <li><strong>排入行程：</strong>在任務庫<strong>點一下</strong>任務，就會加到今日行程最後；也可以拖進中間凹槽指定位置（手機請先長按一下再拖）。</li>
                 <li><strong>調整行程：</strong>凹槽內的任務可拖曳調整順序；拖到外面放開或按 Esc 會回到原位，要移除請按右上角 ✕。</li>
+                <li><strong>完成任務：</strong>按行程任務左上角的 ✓，任務會劃掉並移到最下面，隔天自動清掉；再按一次可取消。任務卡下方會顯示今天已經花的時間。</li>
                 <li><strong>排序類別：</strong>按住類別標題右側的 ☰ 圖示上下拖曳。</li>
                 <li><strong>目前任務：</strong>凹槽最上面的任務就是目前任務（以按下開始時為準）。要換任務，把它拖到最上面。</li>
                 <li><strong>時間記錄：</strong>每段專注與休息結束後會自動記錄時間、任務與實際時長（中途結束的標示「中斷」），保留一年。按凹槽下方「時間記錄」查看，用 ‹ › 切換到過去有記錄的日子；可匯出當天的 CSV（試算表）或 Markdown（筆記），或一次匯出全部記錄的 CSV。</li>
                 <li><strong>懸浮小視窗：</strong>按右上角 ⧉。Chrome／Edge 會開出可操作的置頂小視窗；Firefox 會在右下角出現預覽畫面，再按畫面上的「子母畫面」按鈕（或 Ctrl+Shift+]）讓時間浮在最上層，小視窗上的暫停鍵可以開始／暫停計時。</li>
                 <li><strong>安裝成 App：</strong>手機用瀏覽器選單的「加到主畫面」或「安裝應用程式」，之後可以全螢幕開啟，沒有網路也能用。計時中螢幕不會自動關閉。</li>
                 <li><strong>雲端同步：</strong>按右上角 ☁ 用 Google 登入，手機與電腦登入同一帳號就會自動同步任務庫、行程、記錄與設定。</li>
-                <li><strong>編輯任務：</strong>點一下任務改名，名稱清空即刪除（電腦也可按右鍵刪除）。</li>
+                <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎ 改名，名稱清空即刪除（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
+                <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
+                <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改，按右邊的 ✕ 可以刪掉那一筆。</li>
             </ul>
         </div>
         <div class="modal-section">

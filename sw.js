@@ -63,7 +63,7 @@ self.addEventListener('notificationclick', (event) => {
         self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
             const client = list[0];
             if (!client) return self.clients.openWindow('./');
-            client.postMessage({ type: 'notification-click' });
+            client.postMessage({ type: 'notification-click', tag: event.notification.tag });
             return client.focus();
         })
     );

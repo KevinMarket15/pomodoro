@@ -1,11 +1,43 @@
+/* --- 偏好設定（只存在這台裝置，不同步）：外觀、音量、常駐通知 --- */
+const STORAGE_KEY_PREFS = 'pomodoro_prefs_v1';
+const IS_TOUCH = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
+const prefs = loadPrefs();
+function loadPrefs() {
+    const defaults = { theme: 'auto', volume: 1, statusNotify: IS_TOUCH };
+    try {
+        const p = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFS) || '{}');
+        return { ...defaults, ...(p && typeof p === 'object' ? p : {}) };
+    } catch (err) { return defaults; }
+}
+function savePrefs() { localStorage.setItem(STORAGE_KEY_PREFS, JSON.stringify(prefs)); }
+
+const darkQuery = window.matchMedia ? matchMedia('(prefers-color-scheme: dark)') : null;
+function resolvedTheme() {
+    if (prefs.theme === 'light' || prefs.theme === 'dark') return prefs.theme;
+    return darkQuery && darkQuery.matches ? 'dark' : 'light';
+}
+function applyTheme() {
+    const theme = resolvedTheme();
+    document.documentElement.dataset.theme = theme;
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) meta.content = theme === 'dark' ? '#2b2f36' : '#e0e5ec';
+}
+applyTheme();
+if (darkQuery) darkQuery.addEventListener('change', () => { applyTheme(); refreshThemeDependents(); });
+
 /* --- 0. 音效系統 --- */
 const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 function playTone(type) {
     if (audioCtx.state === 'suspended') audioCtx.resume();
+    const volume = Number(prefs.volume);
+    if (!(volume > 0)) return; // 靜音
     const osc = audioCtx.createOscillator();
     const gainNode = audioCtx.createGain();
+    const master = audioCtx.createGain();
+    master.gain.value = Math.min(volume, 1);
     osc.connect(gainNode);
-    gainNode.connect(audioCtx.destination);
+    gainNode.connect(master);
+    master.connect(audioCtx.destination);
     const now = audioCtx.currentTime;
 
     if (type === 'click') {
@@ -78,7 +110,11 @@ function cleanCategories(raw) {
 function cleanSchedule(raw) {
     if (!Array.isArray(raw)) return [];
     return raw.slice(0, 500).filter(t => t && typeof t === 'object' && cleanText(t.name))
-        .map(t => ({ name: cleanText(t.name), color: cleanColor(t.color) }));
+        .map(t => {
+            const item = { name: cleanText(t.name), color: cleanColor(t.color) };
+            if (t.done) { item.done = true; item.doneAt = Number.isFinite(t.doneAt) ? t.doneAt : Date.now(); }
+            return item;
+        });
 }
 const LOG_MODES = ['focus', 'short', 'long'];
 function cleanLog(l) {
@@ -155,7 +191,6 @@ window.importData = function(input) {
 
 /* --- 2. 蕃茄鐘（專注／休息循環） --- */
 const MODE_LABELS = { focus: '專注', short: '短休息', long: '長休息' };
-const LONG_BREAK_EVERY = 4; // 每完成幾顆蕃茄換一次長休息
 const MIN_LOG_SEC = 10;     // 中斷的時段短於這個秒數就不記錄（避免誤觸）
 
 const timerSettings = loadTimerSettings(); // 各模式時長（秒）
@@ -174,16 +209,25 @@ let attentionTimer = null; let attentionOn = false; // 時間到時讓分頁標�
 let toastTimer = null;
 let wakeLock = null;  // 計時中不讓螢幕自動關閉
 let logCache = { raw: null, logs: [] }; // 時間記錄的解析快取，見 loadLogs
+let lastTimesRefresh = 0; // 上次更新行程卡片「今日已花時間」的時間點
+let statusSig = '';       // 目前顯示中的常駐通知內容，內容沒變就不重發
+const NOTIFY_TAG = 'pomodoro-phase';   // 「時間到」的通知
+const STATUS_TAG = 'pomodoro-status';  // 計時中的常駐通知
 
 const timeDisplay = document.getElementById('time');
 const startBtn = document.getElementById('startBtn');
 
 function loadTimerSettings() {
-    const defaults = { focus: 25 * 60, short: 5 * 60, long: 15 * 60, countUp: false };
+    const defaults = { focus: 25 * 60, short: 5 * 60, long: 15 * 60, countUp: false, longEvery: 4, autoStart: false };
     try { return { ...defaults, ...JSON.parse(localStorage.getItem(STORAGE_KEY_TIMER) || '{}') }; }
     catch (err) { return defaults; }
 }
 function saveTimerSettings() { storeSet(STORAGE_KEY_TIMER, JSON.stringify(timerSettings)); }
+// 每完成幾顆蕃茄換一次長休息
+function longEvery() {
+    const n = Math.round(Number(timerSettings.longEvery));
+    return n >= 2 && n <= 8 ? n : 4;
+}
 
 function todayKey() { return new Date().toLocaleDateString('sv'); } // 本地時區的 YYYY-MM-DD
 // 一筆專注記錄換算成幾顆蕃茄（正數的一段可能換算成好幾顆）
@@ -229,7 +273,7 @@ function phaseProgress() {
 }
 
 /* 時間到的提醒：不再跳出會卡住頁面的對話框，改成畫面上的提示列、分頁標題閃爍與系統通知 */
-function showToast(msg, actionLabel, onAction) {
+function showToast(msg, actionLabel, onAction, duration = 15000) {
     const toast = document.getElementById('toast');
     document.getElementById('toastMsg').textContent = msg;
     const btn = document.getElementById('toastAction');
@@ -238,7 +282,7 @@ function showToast(msg, actionLabel, onAction) {
     btn.onclick = () => { hideToast(); if (onAction) onAction(); };
     toast.classList.add('show');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(hideToast, 15000);
+    toastTimer = setTimeout(hideToast, duration);
 }
 function hideToast() {
     clearTimeout(toastTimer);
@@ -256,10 +300,12 @@ function stopAttention() {
     attentionOn = false; updateDisplay();
 }
 
-const NOTIFY_TAG = 'pomodoro-phase';
 function requestNotifyPermission() {
     if (!('Notification' in window) || Notification.permission !== 'default') return;
-    try { const p = Notification.requestPermission(); if (p && p.catch) p.catch(() => {}); } catch (err) {}
+    try {
+        const p = Notification.requestPermission();
+        if (p && p.then) p.then(() => { statusSig = ''; updateStatusNotification(); }).catch(() => {});
+    } catch (err) {}
 }
 async function getSwRegistration() {
     try { return 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null; }
@@ -285,11 +331,12 @@ async function clearNotifications() {
 // 從提示列或通知按下去：開始已經切好的下一段
 function startFromPrompt() { if (!isRunning) startTimer(); }
 
-function announce(msg) {
+// started = true：已經自動開始下一段，提示列就不用「開始」按鈕
+function announce(msg, started) {
     playTone('alarm');
     setTimeout(() => playTone('alarm'), 700);
     setTimeout(() => playTone('alarm'), 1400);
-    showToast(msg, '開始', startFromPrompt);
+    showToast(msg, started ? null : '開始', startFromPrompt);
     if (document.hidden || !document.hasFocus()) { startAttention(); notify(msg); }
 }
 
@@ -320,9 +367,9 @@ function updateModeUI() {
     document.getElementById('skipBtn').textContent = countUp ? '結束' : '跳過';
 
     const count = getTodayCount();
-    let filled = count % LONG_BREAK_EVERY;
-    if (filled === 0 && count > 0 && mode === 'long') filled = LONG_BREAK_EVERY; // 長休息時顯示滿格
-    document.getElementById('cycleDots').innerHTML = Array.from({ length: LONG_BREAK_EVERY },
+    let filled = count % longEvery();
+    if (filled === 0 && count > 0 && mode === 'long') filled = longEvery(); // 長休息時顯示滿格
+    document.getElementById('cycleDots').innerHTML = Array.from({ length: longEvery() },
         (_, i) => `<span class="dot${i < filled ? ' filled' : ''}"></span>`).join('');
     document.getElementById('pomoCount').innerText = `今日 ${count} 🍅`;
     updateCurrentTask();
@@ -330,7 +377,7 @@ function updateModeUI() {
 
 // 目前任務 = 凹槽第一張卡片
 function getCurrentTask() {
-    const first = document.querySelector('#scheduleSlot .task-card:not(.drop-placeholder) .task-name');
+    const first = document.querySelector('#scheduleSlot .task-card:not(.drop-placeholder):not(.done) .task-name');
     return first ? first.innerText : '';
 }
 
@@ -345,11 +392,65 @@ function updateCurrentTask() {
     const task = currentTaskName();
     if (mode !== 'focus') el.textContent = '☕ 休息時間';
     else el.textContent = task ? `▶ ${task}` : '凹槽第一個任務 = 目前任務';
+    // 標出行程裡的目前任務（第一張還沒完成的）
+    const cards = [...document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)')];
+    const current = cards.find(c => !c.classList.contains('done'));
+    cards.forEach(c => c.classList.toggle('current', c === current));
+    refreshScheduleTimes();
     updateFloating();
+}
+
+// 今天各任務已經專注的秒數（含正在進行的這一段）
+function todayTaskSeconds() {
+    const today = todayKey();
+    const map = {};
+    loadLogs().forEach(l => {
+        if (l.mode === 'focus' && l.task && dateKey(l.start) === today) map[l.task] = (map[l.task] || 0) + l.actualSec;
+    });
+    if (session && session.mode === 'focus' && session.task) {
+        const live = session.activeMs + (isRunning ? Date.now() - session.segStart : 0);
+        map[session.task] = (map[session.task] || 0) + Math.round(live / 1000);
+    }
+    return map;
+}
+function refreshScheduleTimes() {
+    lastTimesRefresh = Date.now();
+    const map = todayTaskSeconds();
+    document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
+        const el = card.querySelector('.task-time');
+        if (!el) return;
+        const sec = map[card.querySelector('.task-name').innerText] || 0;
+        el.textContent = sec >= 60 ? `${Math.round(sec / 60)} 分` : '';
+    });
 }
 
 function saveTimerState() {
     localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify({ mode, timeLeft, endTime, elapsed, countStart, isRunning, session }));
+    updateStatusNotification();
+}
+
+// 計時中的常駐通知。網頁到背景後會被系統暫停，沒辦法每秒更新，
+// 所以顯示不會過時的資訊：倒數顯示「幾點結束」，正數顯示「幾點開始」
+async function updateStatusNotification() {
+    let title = '', body = '';
+    if (prefs.statusNotify && session && 'Notification' in window && Notification.permission === 'granted') {
+        const label = modeLabel(session.mode, !!session.countUp);
+        if (isRunning) {
+            title = session.countUp ? `${label}中 · ${clockText(session.start)} 開始` : `${label}中 · ${clockText(endTime)} 結束`;
+        } else {
+            title = session.countUp ? `${label}已暫停 · 已過 ${formatTime(elapsed)}` : `${label}已暫停 · 剩 ${formatTime(timeLeft)}`;
+        }
+        body = session.mode === 'focus' ? (session.task || '未指定任務') : '休息時間';
+    }
+    const sig = `${title}|${body}`;
+    if (sig === statusSig) return;
+    statusSig = sig;
+    const reg = await getSwRegistration();
+    if (!reg || !reg.active) return;
+    try {
+        if (!title) { (await reg.getNotifications({ tag: STATUS_TAG })).forEach(n => n.close()); return; }
+        await reg.showNotification(title, { body, tag: STATUS_TAG, silent: true, renotify: false, icon: 'icons/icon-192.png' });
+    } catch (err) {}
 }
 
 function setStartBtn(state) {
@@ -364,6 +465,7 @@ function getElapsed() { return Math.max(0, Math.floor((Date.now() - countStart) 
 
 function tick() {
     if (!isRunning) return;
+    if (Date.now() - lastTimesRefresh > 30000) refreshScheduleTimes();
     if (isCountUp()) { elapsed = getElapsed(); updateDisplay(); return; } // 正數沒有終點，按「結束」才結算
     timeLeft = getRemaining();
     updateDisplay();
@@ -464,7 +566,7 @@ function finishCountUp() {
     if (mode === 'focus') {
         const after = before + earned;
         // 這次跨過 4 的倍數就進長休息
-        next = earned && Math.floor(after / LONG_BREAK_EVERY) > Math.floor(before / LONG_BREAK_EVERY) ? 'long' : 'short';
+        next = earned && Math.floor(after / longEvery()) > Math.floor(before / longEvery()) ? 'long' : 'short';
     }
     switchMode(next);
 }
@@ -474,7 +576,7 @@ function advancePhase(completed) {
     let next = 'focus';
     if (mode === 'focus') {
         const count = getTodayCount(); // 自然結束時，剛完成的這顆已經寫入記錄
-        next = (completed && count > 0 && count % LONG_BREAK_EVERY === 0) ? 'long' : 'short';
+        next = (completed && count > 0 && count % longEvery() === 0) ? 'long' : 'short';
     }
     switchMode(next);
 }
@@ -482,10 +584,12 @@ function advancePhase(completed) {
 function finishPhase() {
     const finished = mode;
     stopTimer(); endSession(true);
-    advancePhase(true); // 切到下一段，停在那裡等使用者按開始
+    advancePhase(true); // 切到下一段；預設停在那裡等使用者按開始
+    const auto = !!timerSettings.autoStart;
+    if (auto) startTimer();
     announce(finished === 'focus'
-        ? `專注結束！接下來是${MODE_LABELS[mode]}（${formatTime(timeLeft)}）`
-        : '休息結束，準備開始下一顆蕃茄！');
+        ? `專注結束！接下來是${MODE_LABELS[mode]}（${formatTime(timerSettings[mode])}）`
+        : (auto ? '休息結束，下一顆蕃茄開始了！' : '休息結束，準備開始下一顆蕃茄！'), auto);
 }
 
 window.setTimer = function(minutes) {
@@ -553,12 +657,27 @@ document.addEventListener('visibilitychange', () => {
     updateWakeLock(); // 分頁到背景時螢幕鎖會被系統收回，回來時重新取得
 });
 window.addEventListener('focus', stopAttention);
+// 鍵盤快捷鍵：空白鍵開始／暫停、S 跳過、R 重置（打字或視窗開著時不作用）
+document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
+    const t = e.target;
+    if (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+    if (document.querySelector('.modal-overlay.show')) return;
+    if (e.code === 'Space') {
+        if (t.closest && t.closest('button')) return; // 焦點在按鈕上時，空白鍵本來就會按下那個按鈕
+        e.preventDefault(); startBtn.click();
+    } else if (e.code === 'KeyS') document.getElementById('skipBtn').click();
+    else if (e.code === 'KeyR') document.getElementById('resetBtn').click();
+});
 document.addEventListener('pointerdown', stopAttention);
 document.getElementById('toastClose').addEventListener('click', hideToast);
 if ('serviceWorker' in navigator) {
     // 點了系統通知：service worker 會把視窗叫到前面，再通知這裡開始下一段
     navigator.serviceWorker.addEventListener('message', (e) => {
-        if (e.data && e.data.type === 'notification-click') startFromPrompt();
+        if (!e.data || e.data.type !== 'notification-click') return;
+        // 點常駐通知只是回到網頁（系統會把通知收掉，這裡補發一則）；點「時間到」的通知才開始下一段
+        if (e.data.tag === STATUS_TAG) { statusSig = ''; updateStatusNotification(); }
+        else startFromPrompt();
     });
     if (location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
@@ -577,6 +696,7 @@ function restoreTimerState() {
     }
     updateModeUI(); updateDisplay();
     tick(); // 關閉期間已經到時間的話，立即結束這一段
+    updateStatusNotification();
 }
 restoreTimerState();
 
@@ -596,7 +716,9 @@ function saveCategories() {
 function saveSchedule() {
     const schedule = [];
     document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
-        schedule.push({ name: card.querySelector('.task-name').innerText, color: card.dataset.color || card.querySelector('.tag').style.background });
+        const item = { name: card.querySelector('.task-name').innerText, color: card.dataset.color || card.querySelector('.tag').style.background };
+        if (card.classList.contains('done')) { item.done = true; item.doneAt = Number(card.dataset.doneAt) || Date.now(); }
+        schedule.push(item);
     });
     storeSet(STORAGE_KEY_SCHED, JSON.stringify(schedule));
     updateCurrentTask();
@@ -613,7 +735,11 @@ function initApp() {
 
 function renderScheduleFromStorage() {
     document.getElementById('scheduleSlot').innerHTML = '';
-    cleanSchedule(readStoredJSON(STORAGE_KEY_SCHED)).forEach(t => appendScheduleCard(t.name, t.color));
+    const items = cleanSchedule(readStoredJSON(STORAGE_KEY_SCHED));
+    const today = todayKey();
+    const kept = items.filter(t => !(t.done && dateKey(t.doneAt) !== today)); // 前幾天完成的任務清掉
+    kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null));
+    if (kept.length !== items.length) saveSchedule();
     updateCurrentTask();
 }
 
@@ -637,7 +763,7 @@ function createCategoryDOM(titleText, color, tasks = []) {
     const delCatBtn = document.createElement('div');
     delCatBtn.className = 'del-category-btn';
     delCatBtn.innerText = '刪除類別';
-    delCatBtn.onclick = () => { if(confirm('刪除此類別？')) { group.remove(); saveCategories(); }};
+    delCatBtn.onclick = () => withUndo(STORAGE_KEY_CATS, `已刪除類別「${title.innerText}」`, () => { group.remove(); saveCategories(); });
     group.appendChild(delCatBtn);
 
     const header = document.createElement('div');
@@ -656,7 +782,8 @@ function createCategoryDOM(titleText, color, tasks = []) {
     const addBtn = document.createElement('button');
     addBtn.className = 'add-task-btn';
     addBtn.innerText = '+';
-    addBtn.onclick = () => { playTone('click'); createTaskDOM(grid, '新任務', color); saveCategories(); };
+    addBtn.title = '新增任務';
+    addBtn.onclick = () => { playTone('click'); const card = createTaskDOM(grid, '新任務', color); saveCategories(); editTaskName(card); };
 
     const handle = document.createElement('div');
     handle.className = 'drag-handle';
@@ -684,31 +811,87 @@ function createTaskDOM(container, name, color) {
     const card = document.createElement('div');
     card.className = 'task-card';
     card.dataset.color = color;
+    card.title = '點一下排入今日行程';
 
+    // 點卡片 = 排入行程；改名和刪除走右上角的 ✎
     card.onclick = () => {
-        playTone('click');
-        const nameSpan = card.querySelector('.task-name');
-        const newName = prompt("編輯任務名稱（清空即刪除）:", nameSpan.innerText);
-        if (newName === null) return;
-        if (newName.trim() === '') {
-            if (confirm('從庫中移除此任務？')) { card.remove(); saveCategories(); }
-            return;
-        }
-        nameSpan.innerText = newName; saveCategories();
+        if (card.querySelector('input')) return;
+        addToSchedule(card.querySelector('.task-name').innerText, card.dataset.color);
+        card.classList.remove('added'); void card.offsetWidth; card.classList.add('added');
     };
-    card.oncontextmenu = (e) => {
-        e.preventDefault();
-        if(confirm('從庫中移除此任務？')) { card.remove(); saveCategories(); }
-    };
+    card.oncontextmenu = (e) => { e.preventDefault(); removePaletteTask(card); };
+
+    const edit = document.createElement('span');
+    edit.className = 'edit-icon'; edit.textContent = '✎'; edit.title = '改名（清空即刪除）';
+    edit.onclick = (e) => { e.stopPropagation(); playTone('click'); editTaskName(card); };
 
     const tag = document.createElement('div');
     tag.className = 'tag'; tag.style.background = color;
     const text = document.createElement('div');
     text.className = 'task-name'; text.innerText = name;
-    card.appendChild(tag); card.appendChild(text);
+    card.appendChild(edit); card.appendChild(tag); card.appendChild(text);
 
     card.style.opacity = 0; container.appendChild(card);
     requestAnimationFrame(() => { card.style.transition = 'opacity 0.3s'; card.style.opacity = 1; });
+    return card;
+}
+
+function removePaletteTask(card) {
+    const name = card.querySelector('.task-name').innerText;
+    withUndo(STORAGE_KEY_CATS, `已從任務庫移除「${name}」`, () => { card.remove(); saveCategories(); });
+}
+
+function editTaskName(card) {
+    if (card.querySelector('input')) return;
+    const nameEl = card.querySelector('.task-name');
+    inlineEdit(nameEl, 'task-edit-input', (value) => {
+        if (value === '') removePaletteTask(card);
+        else { nameEl.innerText = value; saveCategories(); }
+    });
+}
+
+// 把一段文字暫時換成輸入框：Enter 或點到別處確定，Esc 取消
+function inlineEdit(el, className, onCommit, initial = el.innerText) {
+    const input = document.createElement('input');
+    input.className = className; input.value = initial; input.maxLength = 200;
+    el.style.display = 'none';
+    el.parentNode.insertBefore(input, el.nextSibling);
+    let finished = false;
+    const finish = (commit) => {
+        if (finished) return;
+        finished = true;
+        const value = input.value.trim();
+        input.remove(); el.style.display = '';
+        if (commit && value !== initial) onCommit(value);
+    };
+    input.addEventListener('keydown', (e) => {
+        e.stopPropagation();
+        if (e.key === 'Enter') finish(true); else if (e.key === 'Escape') finish(false);
+    });
+    input.addEventListener('blur', () => finish(true));
+    input.addEventListener('click', (e) => e.stopPropagation());
+    input.focus(); input.select();
+}
+
+/* 可復原的刪除：先記下這份資料原本的內容，動手後在提示列給「復原」 */
+function withUndo(key, msg, mutate) {
+    if (key === STORAGE_KEY_CATS && localStorage.getItem(key) === null) saveCategories(); // 預設類別還沒存過
+    const before = localStorage.getItem(key);
+    mutate();
+    playTone('delete');
+    showToast(msg, '復原', () => {
+        if (before === null) storeRemove(key); else storeSet(key, before);
+        rerenderKey(key);
+    }, 7000);
+}
+function rerenderKey(key) {
+    if (key === STORAGE_KEY_CATS) renderCategoriesFromStorage();
+    else if (key === STORAGE_KEY_SCHED) renderScheduleFromStorage();
+    else if (key === STORAGE_KEY_LOG) {
+        updateModeUI(); // 今日蕃茄數與各任務時間都是從記錄算的
+        if (document.getElementById('logModal').classList.contains('show')) renderLogModal();
+        if (document.getElementById('statsModal').classList.contains('show')) renderStats();
+    }
 }
 
 window.addNewCategory = function() {
@@ -750,7 +933,7 @@ document.addEventListener('pointerdown', (e) => {
         e.preventDefault();
         drag = { ...base, type: 'category', el: handle.closest('.category-group') };
         activateDrag(); // ☰ 是專用把手，按下就開始
-    } else if (card && !e.target.closest('.delete-icon')) {
+    } else if (card && !e.target.closest('.delete-icon, .done-icon, .edit-icon, input')) {
         drag = { ...base, type: 'task', el: card, origin: slot.contains(card) ? 'groove' : 'palette' };
         if (e.pointerType === 'touch') drag.pressTimer = setTimeout(activateDrag, LONG_PRESS_MS);
     }
@@ -925,28 +1108,56 @@ function getSlotInsertBefore(x, y, exclude) {
 
 function addToSchedule(name, color, sound = true, before = null) {
     if(sound) playTone('drop');
-    appendScheduleCard(name, color, before);
+    // 沒指定位置（點一下加入）就排在還沒完成的任務最後、已完成的前面
+    appendScheduleCard(name, color, before || slot.querySelector('.task-card.done'));
     saveSchedule();
 }
 
 // 只建立卡片、不存檔（從儲存的資料重畫時用，避免把剛收到的雲端資料又當成本機修改傳回去）
-function appendScheduleCard(name, color, before = null) {
+function appendScheduleCard(name, color, before = null, doneAt = null) {
     const div = document.createElement('div');
     div.className = 'task-card';
     div.dataset.color = color;
+    if (doneAt) { div.classList.add('done'); div.dataset.doneAt = doneAt; }
 
     const delBtn = document.createElement('span');
-    delBtn.innerHTML = '✕'; delBtn.className = 'delete-icon';
-    delBtn.onclick = function() { playTone('delete'); div.style.transform = 'scale(0)'; setTimeout(() => { div.remove(); saveSchedule(); }, 200); };
+    delBtn.textContent = '✕'; delBtn.className = 'delete-icon'; delBtn.title = '從行程移除';
+    delBtn.onclick = () => withUndo(STORAGE_KEY_SCHED, `已從行程移除「${name}」`, () => { div.remove(); saveSchedule(); });
+
+    const doneBtn = document.createElement('span');
+    doneBtn.textContent = '✓'; doneBtn.className = 'done-icon'; doneBtn.title = '完成／取消完成';
+    doneBtn.onclick = () => toggleDone(div);
 
     const tag = document.createElement('div'); tag.className = 'tag'; tag.style.background = color;
     const text = document.createElement('div'); text.className = 'task-name'; text.innerText = name;
+    const time = document.createElement('div'); time.className = 'task-time';
 
-    div.appendChild(delBtn); div.appendChild(tag); div.appendChild(text);
+    div.appendChild(delBtn); div.appendChild(doneBtn); div.appendChild(tag); div.appendChild(text); div.appendChild(time);
     slot.insertBefore(div, before);
+    return div;
 }
 
-window.clearSchedule = function() { if(confirm('清空今日行程？')) { playTone('click'); slot.innerHTML = ''; saveSchedule(); } };
+// 完成的任務劃掉並移到最下面；再按一次取消，回到未完成的最後
+function toggleDone(card) {
+    const done = !card.classList.contains('done');
+    if (done) {
+        card.classList.add('done');
+        card.dataset.doneAt = Date.now();
+        slot.appendChild(card);
+        playTone('drop');
+    } else {
+        card.classList.remove('done');
+        delete card.dataset.doneAt;
+        slot.insertBefore(card, slot.querySelector('.task-card.done'));
+        playTone('click');
+    }
+    saveSchedule();
+}
+
+window.clearSchedule = function() {
+    if (!slot.querySelector('.task-card')) return;
+    withUndo(STORAGE_KEY_SCHED, '已清空今日行程', () => { slot.innerHTML = ''; saveSchedule(); });
+};
 
 /* --- 6. 時間記錄與匯出 --- */
 // 記錄一年可能有幾千筆，解析結果快取起來（logCache），內容沒變就不重新解析
@@ -1067,14 +1278,196 @@ function renderLogModal() {
     table.innerHTML = '';
     if (!logs.length) return;
     const head = table.createTHead().insertRow();
-    ['時間', '類型', '任務', '實際', '狀態'].forEach(h => { const th = document.createElement('th'); th.textContent = h; head.appendChild(th); });
+    ['時間', '類型', '任務', '實際', '狀態', ''].forEach(h => { const th = document.createElement('th'); th.textContent = h; head.appendChild(th); });
     const body = table.createTBody();
-    logs.map(logRow).forEach(r => {
+    logs.forEach(l => {
+        const r = logRow(l);
         const tr = body.insertRow();
         if (r.status === '中斷') tr.className = 'interrupted';
-        [`${r.start}–${r.end}`, r.type, r.task, `${r.actual} 分`, r.status].forEach(v => { tr.insertCell().textContent = v; });
+        tr.insertCell().textContent = `${r.start}–${r.end}`;
+        tr.insertCell().textContent = r.type;
+        const taskCell = tr.insertCell(); taskCell.className = 'log-task';
+        const taskText = document.createElement('span'); taskText.textContent = r.task; taskCell.appendChild(taskText);
+        if (l.mode === 'focus') { // 專注的任務名稱可以點一下修改
+            taskCell.classList.add('editable'); taskCell.title = '點一下修改任務名稱';
+            taskCell.onclick = () => editLogTask(l, taskText);
+        }
+        tr.insertCell().textContent = `${r.actual} 分`;
+        tr.insertCell().textContent = r.status;
+        const del = tr.insertCell(); del.className = 'log-del'; del.textContent = '✕'; del.title = '刪除這一筆';
+        del.onclick = () => deleteLog(l);
     });
 }
+
+const sameLog = (a, b) => a.start === b.start && a.mode === b.mode;
+
+function editLogTask(l, textEl) {
+    if (textEl.parentNode.querySelector('input')) return;
+    inlineEdit(textEl, 'log-edit-input', (value) => {
+        const logs = loadLogs();
+        const target = logs.find(x => sameLog(x, l));
+        if (!target) return;
+        target.task = value;
+        // 同步是用「開始時間＋類型」辨識每一筆。內容改了就把開始時間挪 1 毫秒換一個編號，
+        // 其他裝置才會把它當成新的一筆收下來（舊的那筆會被刪掉）
+        let start = target.start + 1;
+        while (logs.some(x => x !== target && x.mode === target.mode && x.start === start)) start++;
+        target.start = start;
+        saveLogs(logs);
+        rerenderKey(STORAGE_KEY_LOG);
+    }, l.task || '');
+}
+
+function deleteLog(l) {
+    withUndo(STORAGE_KEY_LOG, '已刪除一筆記錄', () => {
+        saveLogs(loadLogs().filter(x => !sameLog(x, l)));
+        rerenderKey(STORAGE_KEY_LOG);
+    });
+}
+
+/* --- 每週統計 --- */
+let statsEnd = todayKey(); // 目前顯示的這 7 天的最後一天
+
+function addDays(date, n) {
+    const d = new Date(`${date}T00:00`);
+    d.setDate(d.getDate() + n);
+    return d.toLocaleDateString('sv');
+}
+const shortDate = date => `${Number(date.slice(5, 7))}/${Number(date.slice(8, 10))}`;
+
+function statsRow(name, sec, maxSec, color) {
+    const row = document.createElement('div'); row.className = 'stats-row';
+    const n = document.createElement('span'); n.className = 'stats-row-name'; n.textContent = name;
+    const v = document.createElement('span'); v.className = 'stats-row-val'; v.textContent = `${minutesText(sec)} 分`;
+    const track = document.createElement('div'); track.className = 'stats-row-track';
+    const fill = document.createElement('div'); fill.className = 'stats-row-fill';
+    fill.style.width = `${maxSec ? Math.max(2, sec / maxSec * 100) : 0}%`;
+    fill.style.background = color;
+    track.appendChild(fill);
+    row.appendChild(n); row.appendChild(v); row.appendChild(track);
+    return row;
+}
+
+function fillStatsList(id, entries) {
+    const box = document.getElementById(id);
+    box.innerHTML = '';
+    if (!entries.length) {
+        const empty = document.createElement('div'); empty.className = 'stats-empty'; empty.textContent = '這一週沒有專注記錄';
+        box.appendChild(empty);
+        return;
+    }
+    const max = entries[0].sec;
+    entries.forEach(e => box.appendChild(statsRow(e.name, e.sec, max, e.color)));
+}
+
+function renderStats() {
+    const today = todayKey();
+    const days = Array.from({ length: 7 }, (_, i) => addDays(statsEnd, i - 6));
+    const from = days[0];
+    const allFocus = loadLogs().filter(l => l.mode === 'focus');
+    const logs = allFocus.filter(l => { const d = dateKey(l.start); return d >= from && d <= statsEnd; });
+
+    // 任務屬於哪個類別：用目前任務庫的名稱對照，找不到的歸到「其他」
+    const taskCat = {};
+    cleanCategories(readStoredJSON(STORAGE_KEY_CATS) || []).forEach(c => c.tasks.forEach(t => { if (!taskCat[t]) taskCat[t] = c; }));
+
+    const perDay = Object.fromEntries(days.map(d => [d, { sec: 0, pomo: 0 }]));
+    const byTask = {}, byCat = {};
+    logs.forEach(l => {
+        const day = perDay[dateKey(l.start)];
+        day.sec += l.actualSec; day.pomo += pomodorosOf(l);
+        const cat = taskCat[l.task];
+        const taskName = l.task || '（未指定）';
+        if (!byTask[taskName]) byTask[taskName] = { name: taskName, sec: 0, color: cat ? cat.color : '#999999' };
+        byTask[taskName].sec += l.actualSec;
+        const catName = cat ? cat.title : '其他';
+        if (!byCat[catName]) byCat[catName] = { name: catName, sec: 0, color: cat ? cat.color : '#999999' };
+        byCat[catName].sec += l.actualSec;
+    });
+
+    const totalSec = logs.reduce((sum, l) => sum + l.actualSec, 0);
+    const totalPomo = logs.reduce((sum, l) => sum + pomodorosOf(l), 0);
+    const activeDays = days.filter(d => perDay[d].sec > 0).length;
+    document.getElementById('statsTitle').textContent = `每週統計（${shortDate(from)} – ${shortDate(statsEnd)}）`;
+    document.getElementById('statsSummary').textContent = totalSec
+        ? `專注 ${minutesText(totalSec)} 分鐘 · ${totalPomo} 🍅 · 有記錄的 ${activeDays} 天平均每天 ${minutesText(totalSec / activeDays)} 分鐘`
+        : '這一週沒有專注記錄。';
+    document.getElementById('statsPrev').disabled = !allFocus.some(l => dateKey(l.start) < from);
+    document.getElementById('statsNext').disabled = statsEnd >= today;
+
+    const chart = document.getElementById('statsChart');
+    chart.innerHTML = '';
+    const maxSec = Math.max(...days.map(d => perDay[d].sec), 1);
+    days.forEach(d => {
+        const { sec, pomo } = perDay[d];
+        const col = document.createElement('div');
+        col.className = 'stats-col' + (sec ? '' : ' empty') + (d === today ? ' today' : '');
+        const value = document.createElement('div'); value.className = 'stats-value';
+        value.textContent = sec ? `${Math.round(sec / 60)}分` : '';
+        const bar = document.createElement('div'); bar.className = 'stats-bar';
+        bar.style.height = `${Math.round(sec / maxSec * 100)}px`;
+        const label = document.createElement('div'); label.className = 'stats-day';
+        label.textContent = `${weekdayText(d)} ${shortDate(d)}`;
+        const pomoEl = document.createElement('div'); pomoEl.className = 'stats-day';
+        pomoEl.textContent = pomo ? `${pomo}🍅` : ' ';
+        col.appendChild(value); col.appendChild(bar); col.appendChild(label); col.appendChild(pomoEl);
+        chart.appendChild(col);
+    });
+
+    const sorted = obj => Object.values(obj).sort((a, b) => b.sec - a.sec);
+    fillStatsList('statsTasks', sorted(byTask).slice(0, 12));
+    fillStatsList('statsCats', sorted(byCat));
+}
+
+window.openStatsModal = function() { statsEnd = todayKey(); renderStats(); toggleModal(true, 'statsModal'); };
+function shiftStats(dir) {
+    const next = addDays(statsEnd, dir * 7);
+    if (next > todayKey()) return;
+    playTone('click');
+    statsEnd = next;
+    renderStats();
+}
+
+/* --- 設定視窗 --- */
+function renderSettings() {
+    document.querySelectorAll('#setTheme .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.value === prefs.theme));
+    document.querySelectorAll('#setVolume .seg-btn').forEach(b => b.classList.toggle('active', Number(b.dataset.value) === Number(prefs.volume)));
+    document.getElementById('setLongValue').textContent = longEvery();
+    document.getElementById('setAutoStart').checked = !!timerSettings.autoStart;
+    document.getElementById('setStatusNotify').checked = !!prefs.statusNotify;
+}
+// 主題換了之後，懸浮小視窗也要跟著換
+function refreshThemeDependents() {
+    if (pipWindow) pipWindow.document.documentElement.dataset.theme = resolvedTheme();
+    updateFloating();
+}
+document.getElementById('setTheme').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn'); if (!btn) return;
+    playTone('click');
+    prefs.theme = btn.dataset.value; savePrefs();
+    applyTheme(); refreshThemeDependents(); renderSettings();
+});
+document.getElementById('setVolume').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn'); if (!btn) return;
+    prefs.volume = Number(btn.dataset.value); savePrefs();
+    renderSettings();
+    playTone('alarm'); // 試聽
+});
+function changeLongEvery(delta) {
+    playTone('click');
+    timerSettings.longEvery = Math.min(8, Math.max(2, longEvery() + delta));
+    saveTimerSettings(); updateModeUI(); renderSettings();
+}
+document.getElementById('setLongMinus').addEventListener('click', () => changeLongEvery(-1));
+document.getElementById('setLongPlus').addEventListener('click', () => changeLongEvery(1));
+document.getElementById('setAutoStart').addEventListener('change', (e) => {
+    timerSettings.autoStart = e.target.checked; saveTimerSettings();
+});
+document.getElementById('setStatusNotify').addEventListener('change', (e) => {
+    prefs.statusNotify = e.target.checked; savePrefs();
+    if (e.target.checked) requestNotifyPermission();
+    statusSig = ''; updateStatusNotification();
+});
 
 window.openLogModal = function() { logViewDate = todayKey(); renderLogModal(); toggleModal(true, 'logModal'); };
 
@@ -1196,6 +1589,7 @@ async function openDocPip() {
         }
     });
     doc.title = '蕃茄鐘';
+    doc.documentElement.dataset.theme = resolvedTheme();
     doc.body.className = 'mini-body';
     doc.body.innerHTML = `
         <div class="mini">
@@ -1299,10 +1693,12 @@ function drawPipCanvas() {
     const { canvas } = videoPip;
     const ctx = canvas.getContext('2d');
     const W = canvas.width, H = canvas.height;
-    const accent = getComputedStyle(document.body).getPropertyValue('--accent-color').trim() || '#ff6b6b';
+    const css = getComputedStyle(document.body);
+    const cssVar = (name, fallback) => css.getPropertyValue(name).trim() || fallback;
+    const accent = cssVar('--accent-color', '#ff6b6b');
     const font = '"Helvetica Neue", Arial, "Microsoft JhengHei", sans-serif';
 
-    ctx.fillStyle = '#e0e5ec'; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = cssVar('--bg-color', '#e0e5ec'); ctx.fillRect(0, 0, W, H);
     ctx.fillStyle = accent; ctx.fillRect(0, 0, W, 14);
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
 
@@ -1310,16 +1706,16 @@ function drawPipCanvas() {
     ctx.font = `bold 36px ${font}`; ctx.fillStyle = accent;
     ctx.fillText(fitText(ctx, task ? `${modeLabel()} · ${task}` : modeLabel(), W - 60), W / 2, 62);
 
-    ctx.font = `300 160px ${font}`; ctx.fillStyle = '#4a4a4a';
+    ctx.font = `300 160px ${font}`; ctx.fillStyle = cssVar('--text-color', '#4a4a4a');
     ctx.fillText(formatTime(shownSeconds()), W / 2, 172);
 
     // 進度條
     const barX = 60, barY = 262, barW = W - 120, barH = 14;
-    ctx.fillStyle = '#c9d1db'; roundRect(ctx, barX, barY, barW, barH, barH / 2); ctx.fill();
+    ctx.fillStyle = resolvedTheme() === 'dark' ? '#454b55' : '#c9d1db'; roundRect(ctx, barX, barY, barW, barH, barH / 2); ctx.fill();
     const fillW = barW * phaseProgress();
     if (fillW >= barH) { ctx.fillStyle = accent; roundRect(ctx, barX, barY, fillW, barH, barH / 2); ctx.fill(); }
 
-    ctx.font = `28px ${font}`; ctx.fillStyle = '#777';
+    ctx.font = `28px ${font}`; ctx.fillStyle = cssVar('--faint', '#777');
     ctx.fillText(isRunning ? '計時中 · 按暫停鍵可暫停' : (session ? '已暫停 · 按暫停鍵繼續' : '按暫停鍵開始'), W / 2, 318);
 }
 
@@ -1348,7 +1744,7 @@ window.pomodoroApp = {
             if (session) incoming.countUp = timerSettings.countUp; // 進行中的這一段不切換倒數／正數
             Object.assign(timerSettings, incoming);
             if (!session && !isRunning) { timeLeft = timerSettings[mode]; elapsed = 0; }
-            updateModeUI(); updateDisplay();
+            updateModeUI(); updateDisplay(); renderSettings();
         }
     }
 };
@@ -1357,6 +1753,10 @@ window.pomodoroApp = {
  * HTML 裡不寫 onclick：這樣內容安全政策才能禁止所有寫在網頁裡的程式碼，只執行這幾個檔案。 */
 const ACTIONS = {
     'open-help': () => toggleModal(true),
+    'open-settings': () => { renderSettings(); toggleModal(true, 'settingsModal'); },
+    'open-stats': () => openStatsModal(),
+    'stats-prev': () => shiftStats(-1),
+    'stats-next': () => shiftStats(1),
     'open-sync': () => toggleModal(true, 'syncModal'),
     'open-float': () => openFloating(),
     'open-log': () => openLogModal(),
@@ -1380,6 +1780,13 @@ document.querySelectorAll('.preset-btn').forEach(btn => {
     btn.addEventListener('click', () => setTimer(Number(btn.dataset.min)));
 });
 document.getElementById('importFile').addEventListener('change', (e) => importData(e.target));
+// 手機的 ☰ 選單：點一下展開，選了項目或點到外面就收起來
+const fabBar = document.getElementById('fabBar');
+document.getElementById('fabToggle').addEventListener('click', () => { playTone('click'); fabBar.classList.toggle('open'); });
+document.addEventListener('click', (e) => {
+    if (e.target.closest('#fabToggle')) return;
+    fabBar.classList.remove('open');
+});
 // 點視窗外面或右上角 × 關閉
 document.querySelectorAll('.modal-overlay').forEach(overlay => {
     overlay.addEventListener('click', (e) => {
