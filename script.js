@@ -41,7 +41,7 @@ function playTone(type) {
     const osc = audioCtx.createOscillator();
     const gainNode = audioCtx.createGain();
     const master = audioCtx.createGain();
-    master.gain.value = Math.min(volume, 1);
+    master.gain.value = Math.min(volume, 1) ** 2; // 平方：滑桿每一格聽起來的差距比較平均
     osc.connect(gainNode);
     gainNode.connect(master);
     master.connect(audioCtx.destination);
@@ -139,6 +139,9 @@ function cleanSchedule(raw) {
             const item = { id: cleanText(t.id, 40) || `old:${name}:${n}`, name, color: cleanColor(t.color) };
             if (t.done) { item.done = true; item.doneAt = Number.isFinite(t.doneAt) ? t.doneAt : Date.now(); }
             if (t.est != null) item.est = cleanEst(t.est);
+            // did：這張卡已經完成幾顆；last：最後一次記帳的那段專注的開始時間（防止重複記）
+            if (t.did > 0) item.did = Math.min(999, Math.floor(t.did));
+            if (t.last != null) item.last = cleanText(String(t.last), 20);
             return item;
         });
 }
@@ -258,9 +261,15 @@ function longEvery() {
 
 function todayKey() { return new Date().toLocaleDateString('sv'); } // 本地時區的 YYYY-MM-DD
 // 一筆專注記錄換算成幾顆蕃茄（正數的一段可能換算成好幾顆）
+// 蕃茄的定義：
+//   - 倒數：完成一段專注算一顆
+//   - 正數：每滿一段「專注時長」算一顆
+//   - 不管哪一種，專注不到 5 分鐘都不算（避免誤觸或測試用的超短時長灌水）
+const MIN_POMODORO_SEC = 5 * 60;
 function pomodorosOf(l) {
-    if (l.mode !== 'focus') return 0;
-    return l.countUp ? (l.pomodoros || 0) : (l.completed ? 1 : 0);
+    if (l.mode !== 'focus' || l.actualSec < MIN_POMODORO_SEC) return 0;
+    if (!l.countUp) return l.completed ? 1 : 0;
+    return Math.min(l.pomodoros || 0, Math.floor(l.actualSec / MIN_POMODORO_SEC));
 }
 // 今日蕃茄數直接從時間記錄算（以結束時間為準，跨午夜的那顆算在結束的那天）。
 // 記錄是逐筆同步的，兩台裝置各自完成的蕃茄會加總，不會互相覆蓋。
@@ -403,9 +412,25 @@ function updateModeUI() {
 }
 
 // 目前任務 = 凹槽第一張卡片
+function getCurrentCard() { return document.querySelector('#scheduleSlot .task-card:not(.drop-placeholder):not(.done)'); }
 function getCurrentTask() {
-    const first = document.querySelector('#scheduleSlot .task-card:not(.drop-placeholder):not(.done) .task-name');
-    return first ? first.innerText : '';
+    const card = getCurrentCard();
+    return card ? card.querySelector('.task-name').innerText : '';
+}
+
+const cardEst = card => (card.dataset.est ? cleanEst(card.dataset.est) : 1);
+const cardDid = card => Math.max(0, Math.floor(Number(card.dataset.did)) || 0);
+
+// 把剛完成的蕃茄記到「開始這一段時的那張卡」上；做滿預估顆數就自動標記完成，輪到下一個任務。
+// sessionStart 用來避免重複記：兩台裝置同步計時時，同一段會在兩邊各結束一次
+function creditCard(cardId, earned, sessionStart) {
+    if (!cardId || !(earned > 0)) return;
+    const card = [...document.querySelectorAll('#scheduleSlot .task-card')].find(c => c.dataset.id === cardId);
+    if (!card || card.dataset.last === String(sessionStart)) return;
+    card.dataset.did = cardDid(card) + earned;
+    card.dataset.last = sessionStart;
+    if (!card.classList.contains('done') && cardDid(card) >= cardEst(card)) toggleDone(card, true); // 會存檔
+    else saveSchedule();
 }
 
 // 計時中的任務以開始時的第一張為準
@@ -444,33 +469,36 @@ function todayTaskStats() {
     return map;
 }
 
-// 更新行程卡片下方的「已完成／預估 🍅、已花時間」，以及行程上方的預計完成時間
+// 從現在起再做完 k 顆蕃茄要多久（秒），含中間的休息：
+// 每顆之間休息一次，輪到「幾顆一次」時是長休息；正在進行的這一段已經過的時間不重算
+function secondsForTomatoes(k) {
+    if (k <= 0) return 0;
+    const count = getTodayCount(), every = longEvery();
+    const longs = Math.max(0, Math.floor((count + k - 1) / every) - Math.floor(count / every));
+    let sec = k * timerSettings.focus + Math.max(0, k - 1 - longs) * timerSettings.short + longs * timerSettings.long;
+    if (mode !== 'focus') sec += timeLeft;                                                         // 現在在休息：先把休息過完
+    else if (session && !session.countUp) sec -= Math.max(0, timerSettings.focus - timeLeft);     // 這顆已經做了一部分
+    return Math.max(0, sec);
+}
+
+// 更新行程卡片下方的「已完成／預估 🍅」，以及每張卡與整份行程的預計完成時間。
+// 進度是每張卡各自記的（同名的兩張卡不會互相影響），預計時間照行程順序往下累加
 function refreshScheduleTimes() {
     lastTimesRefresh = Date.now();
-    const stats = todayTaskStats();
-    let remaining = 0;
+    let cumulative = 0;
     document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)').forEach(card => {
         const el = card.querySelector('.task-time');
         if (!el) return;
-        const s = stats[card.querySelector('.task-name').innerText] || { sec: 0, pomo: 0 };
-        const est = card.dataset.est ? cleanEst(card.dataset.est) : 0;
-        const parts = [];
-        if (est) parts.push(`${s.pomo}/${est}🍅`);
-        if (s.sec >= 60) parts.push(`${Math.round(s.sec / 60)}分`);
-        el.textContent = parts.join(' ');
-        if (est && !card.classList.contains('done')) remaining += Math.max(0, est - s.pomo);
+        const est = cardEst(card), did = cardDid(card);
+        el.textContent = `${did}/${est}🍅`;
+        const name = card.querySelector('.task-name').innerText;
+        if (card.classList.contains('done')) { card.title = name; delete card.dataset.eta; return; }
+        cumulative += Math.max(0, est - did);
+        card.dataset.eta = Date.now() + secondsForTomatoes(cumulative) * 1000;
+        card.title = `${name}｜預計 ${clockText(Number(card.dataset.eta))} 做完`;
     });
-
-    const planEl = document.getElementById('schedulePlan');
-    if (!remaining) { planEl.textContent = ''; return; }
-    // 剩下的蕃茄之間有 remaining - 1 次休息，其中幾次會輪到長休息
-    const count = getTodayCount(), every = longEvery();
-    const longs = Math.max(0, Math.floor((count + remaining - 1) / every) - Math.floor(count / every));
-    let sec = remaining * timerSettings.focus
-        + Math.max(0, remaining - 1 - longs) * timerSettings.short + longs * timerSettings.long;
-    // 正在進行的這顆已經過的時間不用再算
-    if (session && session.mode === 'focus' && !session.countUp) sec -= Math.max(0, timerSettings.focus - timeLeft);
-    planEl.textContent = `剩 ${remaining} 顆 · 約 ${clockText(Date.now() + Math.max(0, sec) * 1000)} 做完`;
+    document.getElementById('schedulePlan').textContent = cumulative
+        ? `剩 ${cumulative} 顆 · 約 ${clockText(Date.now() + secondsForTomatoes(cumulative) * 1000)} 做完` : '';
 }
 
 function saveTimerState() {
@@ -536,7 +564,8 @@ function startTimer() {
     const countUp = isCountUp();
     if (!countUp && timeLeft <= 0) timeLeft = timerSettings[mode];
     if (!session) {
-        session = { mode, task: mode === 'focus' ? getCurrentTask() : '', start: Date.now(),
+        const card = mode === 'focus' ? getCurrentCard() : null;
+        session = { mode, task: mode === 'focus' ? getCurrentTask() : '', cardId: card ? card.dataset.id : null, start: Date.now(),
                     plannedSec: countUp ? 0 : timeLeft, activeMs: 0, countUp };
     }
     session.segStart = Date.now();
@@ -609,28 +638,28 @@ function setCountUp(countUp) {
 function finishCountUp() {
     stopTimer();
     const before = getTodayCount();
-    let earned = 0;
+    const cardId = session && session.cardId, sessionStart = session && session.start;
     if (mode === 'focus' && session) {
-        earned = Math.floor(session.activeMs / 1000 / timerSettings.focus);
-        session.pomodoros = earned;
+        // 一顆的長度＝專注時長，但最短以 5 分鐘計
+        session.pomodoros = Math.floor(session.activeMs / 1000 / Math.max(timerSettings.focus, MIN_POMODORO_SEC));
     }
+    const wasFocus = mode === 'focus';
     endSession(true); // 寫入記錄後，今日蕃茄數就會包含這次的
+    const after = getTodayCount(), earned = after - before;
+    creditCard(cardId, earned, sessionStart);
     let next = 'focus';
-    if (mode === 'focus') {
-        const after = before + earned;
-        // 這次跨過 4 的倍數就進長休息
-        next = earned && Math.floor(after / longEvery()) > Math.floor(before / longEvery()) ? 'long' : 'short';
-    }
+    // 這次跨過「幾顆一次長休息」的倍數就進長休息
+    if (wasFocus) next = earned && Math.floor(after / longEvery()) > Math.floor(before / longEvery()) ? 'long' : 'short';
     switchMode(next);
     autoDriveSave(false);
 }
 
-// completed = true 表示這段是自然結束（計入完成數）；false 表示按了「跳過」
-function advancePhase(completed) {
+// completed = true 表示這段是自然結束；earned 是這一段實際算到幾顆蕃茄（太短的不算）
+function advancePhase(completed, earned = 0) {
     let next = 'focus';
     if (mode === 'focus') {
         const count = getTodayCount(); // 自然結束時，剛完成的這顆已經寫入記錄
-        next = (completed && count > 0 && count % longEvery() === 0) ? 'long' : 'short';
+        next = (completed && earned > 0 && count % longEvery() === 0) ? 'long' : 'short';
     }
     switchMode(next);
 }
@@ -640,8 +669,12 @@ function finishPhase() {
     const auto = !!timerSettings.autoStart;
     forcedRev = endTime || Date.now();
     try {
+        const before = getTodayCount();
+        const cardId = session && session.cardId, sessionStart = session && session.start;
         stopTimer(); endSession(true);
-        advancePhase(true); // 切到下一段；預設停在那裡等使用者按開始
+        const earned = getTodayCount() - before;
+        creditCard(cardId, earned, sessionStart);
+        advancePhase(true, earned); // 切到下一段；預設停在那裡等使用者按開始
         if (auto) startTimer();
     } finally { forcedRev = 0; }
     announce(finished === 'focus'
@@ -783,6 +816,8 @@ function saveSchedule() {
         const item = { id: card.dataset.id, name: card.querySelector('.task-name').innerText, color: card.dataset.color || card.querySelector('.tag').style.background };
         if (card.classList.contains('done')) { item.done = true; item.doneAt = Number(card.dataset.doneAt) || Date.now(); }
         if (card.dataset.est) item.est = cleanEst(card.dataset.est);
+        if (cardDid(card)) item.did = cardDid(card);
+        if (card.dataset.last) item.last = card.dataset.last;
         schedule.push(item);
     });
     storeSet(STORAGE_KEY_SCHED, JSON.stringify(schedule));
@@ -803,7 +838,7 @@ function renderScheduleFromStorage() {
     const items = cleanSchedule(readStoredJSON(STORAGE_KEY_SCHED));
     const today = todayKey();
     const kept = items.filter(t => !(t.done && dateKey(t.doneAt) !== today)); // 前幾天完成的任務清掉
-    kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null, t.est, t.id));
+    kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null, t.est, t.id, t));
     if (kept.length !== items.length) saveSchedule();
     updateCurrentTask();
 }
@@ -1239,11 +1274,13 @@ function addToSchedule(name, color, sound = true, before = null, est = null) {
 }
 
 // 只建立卡片、不存檔（從儲存的資料重畫時用，避免把剛收到的雲端資料又當成本機修改傳回去）
-function appendScheduleCard(name, color, before = null, doneAt = null, est = null, id = null) {
+function appendScheduleCard(name, color, before = null, doneAt = null, est = null, id = null, progress = null) {
     const div = document.createElement('div');
     div.className = 'task-card';
     div.dataset.color = color;
     div.dataset.id = id || newItemId();
+    if (progress && progress.did) div.dataset.did = progress.did;
+    if (progress && progress.last) div.dataset.last = progress.last;
     if (est) div.dataset.est = cleanEst(est);
     if (doneAt) { div.classList.add('done'); div.dataset.doneAt = doneAt; }
 
@@ -1269,7 +1306,10 @@ function renderCardPanel() {
     const done = card.classList.contains('done');
     const s = todayTaskStats()[name] || { sec: 0, pomo: 0 };
     document.getElementById('cardTitle').textContent = name;
-    document.getElementById('cardInfo').textContent = `今天已完成 ${s.pomo} 顆` + (s.sec >= 60 ? `，專注 ${Math.round(s.sec / 60)} 分鐘` : '');
+    const info = [`這張卡已完成 ${cardDid(card)}／${cardEst(card)} 顆`];
+    if (s.sec >= 60) info.push(`這個任務今天共專注 ${Math.round(s.sec / 60)} 分鐘`);
+    if (!done && card.dataset.eta) info.push(`預計 ${clockText(Number(card.dataset.eta))} 做完`);
+    document.getElementById('cardInfo').textContent = info.join('　');
     document.getElementById('cardEst').textContent = card.dataset.est ? cleanEst(card.dataset.est) : 1;
     document.getElementById('cardStepper').style.display = done ? 'none' : '';
     document.getElementById('cardDone').textContent = done ? '↩ 取消完成' : '✓ 完成';
@@ -1307,13 +1347,13 @@ function changeCardEst(card, delta) {
 }
 
 // 完成的任務劃掉並移到最下面；再按一次取消，回到未完成的最後
-function toggleDone(card) {
+function toggleDone(card, quiet = false) {
     const done = !card.classList.contains('done');
     if (done) {
         card.classList.add('done');
         card.dataset.doneAt = Date.now();
         slot.appendChild(card);
-        playTone('drop');
+        if (!quiet) playTone('drop');
     } else {
         card.classList.remove('done');
         delete card.dataset.doneAt;
@@ -1376,7 +1416,7 @@ function logRow(l) {
         type: modeLabel(l.mode, !!l.countUp),
         task: l.mode === 'focus' ? (l.task || '（未指定）') : '—',
         planned: l.countUp ? '—' : minutesText(l.plannedSec), actual: minutesText(l.actualSec),
-        status: !l.completed ? '中斷' : (l.countUp && l.mode === 'focus' ? `完成（${l.pomodoros || 0} 🍅）` : '完成')
+        status: !l.completed ? '中斷' : (l.countUp && l.mode === 'focus' ? `完成（${pomodorosOf(l)} 🍅）` : '完成')
     };
 }
 
@@ -1749,7 +1789,8 @@ function aiDataLines(has) {
             const s = stats[t.name] || { sec: 0, pomo: 0 };
             const extra = [];
             if (t.est) extra.push(`預估 ${t.est} 顆`);
-            if (s.pomo || s.sec >= 60) extra.push(`今天已完成 ${s.pomo} 顆、${min(s.sec)} 分鐘`);
+            if (t.did) extra.push(`已完成 ${t.did} 顆`);
+            if (s.sec >= 60) extra.push(`這個任務今天共專注 ${min(s.sec)} 分鐘`);
             lines.push(`${i + 1}. [${t.done ? 'x' : ' '}] ${mdCell(t.name)}${extra.length ? `（${extra.join('，')}）` : ''}`);
         });
         if (!sched.length) lines.push('（還沒有排任務）');
@@ -1930,7 +1971,9 @@ document.getElementById('aiPlanAppend').addEventListener('click', () => applyAiP
 /* --- 設定視窗 --- */
 function renderSettings() {
     document.querySelectorAll('#setTheme .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.value === prefs.theme));
-    document.querySelectorAll('#setVolume .seg-btn').forEach(b => b.classList.toggle('active', Number(b.dataset.value) === Number(prefs.volume)));
+    const level = Math.round(Math.min(1, Math.max(0, Number(prefs.volume) || 0)) * 10);
+    document.getElementById('setVolume').value = level;
+    document.getElementById('setVolumeValue').textContent = level ? level : '靜音';
     document.getElementById('setLongValue').textContent = longEvery();
     document.getElementById('setAutoStart').checked = !!timerSettings.autoStart;
     document.getElementById('setStatusNotify').checked = !!prefs.statusNotify;
@@ -1946,12 +1989,11 @@ document.getElementById('setTheme').addEventListener('click', (e) => {
     prefs.theme = btn.dataset.value; savePrefs();
     applyTheme(); refreshThemeDependents(); renderSettings();
 });
-document.getElementById('setVolume').addEventListener('click', (e) => {
-    const btn = e.target.closest('.seg-btn'); if (!btn) return;
-    prefs.volume = Number(btn.dataset.value); savePrefs();
+document.getElementById('setVolume').addEventListener('input', (e) => {
+    prefs.volume = Number(e.target.value) / 10; savePrefs();
     renderSettings();
-    playTone('alarm'); // 試聽
 });
+document.getElementById('setVolume').addEventListener('change', () => playTone('alarm')); // 放開滑桿時試聽
 function changeLongEvery(delta) {
     playTone('click');
     timerSettings.longEvery = Math.min(8, Math.max(2, longEvery() + delta));

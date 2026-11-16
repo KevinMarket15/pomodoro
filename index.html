@@ -201,10 +201,9 @@
             </div>
             <div class="setting-row">
                 <span class="setting-label">提示音</span>
-                <div class="seg" id="setVolume">
-                    <button class="seg-btn" data-value="0">靜音</button>
-                    <button class="seg-btn" data-value="0.35">小聲</button>
-                    <button class="seg-btn" data-value="1">正常</button>
+                <div class="slider-wrap">
+                    <input type="range" class="slider" id="setVolume" min="0" max="10" step="1" aria-label="提示音音量">
+                    <span id="setVolumeValue">10</span>
                 </div>
             </div>
             <div class="setting-row">
@@ -262,6 +261,7 @@
             <div class="modal-title">使用說明</div>
             <ul class="modal-list">
                 <li><strong>專注／休息循環：</strong>專注結束後自動切到短休息，每完成 4 顆蕃茄改為長休息，切好後會停在那裡等你按「開始」。「跳過」直接進入下一段（不計入完成數）。</li>
+                <li><strong>蕃茄怎麼算：</strong>倒數完成一段專注算一顆；正數每滿一段專注時長算一顆。專注不到 5 分鐘不算。行程裡每張任務卡各自記錄完成了幾顆，做滿預估的顆數會自動標記完成，輪到下一個任務。</li>
                 <li><strong>時間到的提醒：</strong>會響三聲，並在畫面上方出現提示列。第一次按「開始」時瀏覽器會問要不要允許通知；允許之後，分頁在背景時也會跳出系統通知，點通知就開始下一段。</li>
                 <li><strong>倒數／正數：</strong>上方第二排切換。正數從 00:00 往上數（專注時稱為「自由專注」），想停時按「結束」：專注每滿一段專注時長（預設 25 分鐘）算一顆蕃茄，然後自動切到休息。</li>
                 <li><strong>時長設定：</strong>數字按鈕或直接點擊時間輸入，會設定「目前模式」的時長並記住。</li>
@@ -275,7 +275,7 @@
                 <li><strong>安裝成 App：</strong>手機用瀏覽器選單的「加到主畫面」或「安裝應用程式」，之後可以全螢幕開啟，沒有網路也能用。計時中螢幕不會自動關閉。</li>
                 <li><strong>雲端同步：</strong>按右上角 ☁ 用 Google 登入，手機與電腦登入同一帳號就會自動同步任務庫、行程、記錄與設定。</li>
                 <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
-                <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完。</li>
+                <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完（照行程順序計算，含休息時間）。點卡片可以看那一張預計幾點做完。</li>
                 <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
                 <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。也可以把資料存到 Google 雲端硬碟，讓有連接雲端硬碟的 AI 直接讀取。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>

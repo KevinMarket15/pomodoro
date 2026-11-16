@@ -455,3 +455,49 @@ html.unlocked .gate { display: none; }
 .gate-card .action-btn { flex: none; width: 100%; margin-top: 6px; }
 
 a.action-btn { text-decoration: none; }
+
+/* --- 對比加強（淺色模式）：文字加深、按鈕邊緣更明顯、強調色改深一點 --- */
+:root {
+    --text-color: #2f3237;
+    --muted: #454a52;
+    --faint: #626872;
+    --accent-color: #e04349;
+    --success-color: #0c9373;
+    --long-color: #2b78d8;
+    --outer-shadow: 9px 9px 16px rgba(140,156,180, 0.75), -9px -9px 16px rgba(255,255,255, 0.7);
+    --inner-shadow: inset 6px 6px 10px 0 rgba(140,156,180, 0.8), inset -6px -6px 10px 0 rgba(255,255,255, 0.85);
+    --small-outer: 3px 3px 6px rgba(140,156,180, 0.75), -3px -3px 6px rgba(255,255,255, 0.7);
+    --line: rgba(120,136,160, 0.5);
+}
+:root[data-theme="dark"] {
+    --accent-color: #ff6b6b; --success-color: #1dd1a1; --long-color: #54a0ff;
+    --muted: #c3cad4; --faint: #9aa3b0;
+}
+body[data-mode="long"] { --accent-color: var(--long-color); }
+.mode-btn, .count-btn, .preset-btn, .clear-btn { color: var(--muted); }
+.clear-btn { opacity: 0.85; }
+.groove-header { opacity: 0.85; }
+.reset-all-icon { opacity: 0.5; }
+.del-category-btn { font-size: 11px; color: var(--faint); }
+.task-card { color: var(--text-color); }
+.task-time { font-size: 0.68rem; }
+.groove-plan { font-size: 0.78rem; color: var(--muted); }
+.modal-list { color: var(--muted); }
+.add-category-main-btn { border-color: var(--faint); color: var(--muted); }
+.task-card.done { opacity: 0.6; }
+
+/* --- 任務名稱：兩行、每行 5 個字，超過直接截掉（不顯示「…」佔位置） --- */
+.task-card { padding-bottom: 12px; }
+.tag { margin-bottom: 5px; }
+.task-name {
+    max-width: 70px; white-space: normal; word-break: break-all; text-align: center;
+    line-height: 1.25; max-height: 2.5em; overflow: hidden; text-overflow: clip;
+}
+
+/* --- 音量滑桿 --- */
+.slider-wrap { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+.slider-wrap span { min-width: 2.2em; text-align: right; font-size: 0.85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+.slider { -webkit-appearance: none; appearance: none; width: 150px; height: 8px; border-radius: 4px; background: transparent; box-shadow: var(--inner-shadow); cursor: pointer; margin: 0; }
+.slider::-webkit-slider-thumb { -webkit-appearance: none; width: 22px; height: 22px; border-radius: 50%; background: var(--accent-color); border: 3px solid var(--bg-color); box-shadow: var(--small-outer); }
+.slider::-moz-range-thumb { width: 18px; height: 18px; border-radius: 50%; background: var(--accent-color); border: 3px solid var(--bg-color); box-shadow: var(--small-outer); }
+.slider::-moz-range-track { background: transparent; }
