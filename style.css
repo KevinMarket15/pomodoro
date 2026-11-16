@@ -439,3 +439,4 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
     }
     .sheet .modal-section { margin-bottom: 0; }
 }
+.video-pip-panel .vp-full { width: 100%; margin-top: 10px; }

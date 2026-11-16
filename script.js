@@ -860,9 +860,8 @@ function createTaskDOM(container, name, color, meta) {
     card.onclick = () => {
         if (card.querySelector('input')) return;
         const taskName = card.querySelector('.task-name').innerText;
-        // 行程裡已經有這個任務（還沒完成）：不另外加一張，直接多排一顆
-        const existing = [...slot.querySelectorAll('.task-card:not(.done):not(.drop-placeholder)')]
-            .find(c => c.querySelector('.task-name').innerText === taskName);
+        // 行程最後一個任務剛好是它：不另外加一張，直接多排一顆
+        const existing = stackTarget(taskName);
         if (existing) { playTone('drop'); changeCardEst(existing, 1); }
         else addToSchedule(taskName, card.dataset.color, true, null, cleanEst(card.dataset.est));
         card.classList.remove('added'); void card.offsetWidth; card.classList.add('added');
@@ -1266,6 +1265,14 @@ document.getElementById('cardRemove').addEventListener('click', () => panelActio
     const name = card.querySelector('.task-name').innerText;
     withUndo(STORAGE_KEY_SCHED, `已從行程移除「${name}」`, () => { card.remove(); saveSchedule(); });
 }));
+
+// 新加入的任務可以疊到哪張卡上：只有「還沒完成的最後一張」剛好是同一個任務時才疊，
+// 這樣才排得出「日文 → 午餐 → 日文」，不會被併成「日文 ×2 → 午餐」
+function stackTarget(name) {
+    const undone = slot.querySelectorAll('.task-card:not(.done):not(.drop-placeholder)');
+    const last = undone[undone.length - 1];
+    return last && last.querySelector('.task-name').innerText === name ? last : null;
+}
 
 // 調整行程卡片的預估蕃茄數（1–12）
 function changeCardEst(card, delta) {
@@ -1806,8 +1813,8 @@ function applyAiPlan(replace) {
             const known = library[item.name];
             if (!known) unknown++;
             const est = item.est ? cleanEst(item.est) : (known ? known.est : 1);
-            // 和手動操作一致：行程裡已經有同一個任務（還沒完成）就把顆數加上去，不另外多一張
-            const existing = [...slot.querySelectorAll('.task-card:not(.done)')].find(c => c.querySelector('.task-name').innerText === item.name);
+            // 和手動操作一致：只有行程最後一個任務剛好相同時才把顆數加上去，否則另外一張
+            const existing = stackTarget(item.name);
             if (existing) existing.dataset.est = Math.min(12, (existing.dataset.est ? cleanEst(existing.dataset.est) : 1) + est);
             else appendScheduleCard(item.name, known ? known.color : '#999999', slot.querySelector('.task-card.done'), null, est);
         });
@@ -2014,16 +2021,27 @@ async function openVideoPip() {
         panel.className = 'video-pip-panel';
         panel.innerHTML = `
             <button class="modal-close" title="關閉懸浮時間">×</button>
-            <div class="vp-hint">
-                把滑鼠移到下方畫面上，按右側出現的「子母畫面」按鈕（或按 <b>Ctrl+Shift+]</b>），時間就會浮在所有視窗上方。<br>
-                小視窗上的<b>暫停鍵</b>可以開始／暫停計時。<br>
-                這個面板要留著，關掉會一起關閉懸浮時間。
-            </div>`;
+            <div class="vp-hint">${IS_TOUCH
+                ? `手機：按下面的「全螢幕」，再按手機的<b>主畫面鍵</b>（或上滑回桌面），時間就會縮成小視窗浮在其他 App 上面。`
+                : `把滑鼠移到下方畫面上，按右側出現的「子母畫面」按鈕（或按 <b>Ctrl+Shift+]</b>），時間就會浮在所有視窗上方。<br>
+                   小視窗上的<b>暫停鍵</b>可以開始／暫停計時。<br>
+                   這個面板要留著，關掉會一起關閉懸浮時間。`}
+            </div>
+            <button class="action-btn vp-full">⛶ 全螢幕</button>`;
         const video = document.createElement('video');
         video.muted = true; video.playsInline = true;
         panel.appendChild(video);
         document.body.appendChild(panel);
         panel.querySelector('.modal-close').onclick = () => closeVideoPip();
+        // 全螢幕顯示時間。手機瀏覽器在影片全螢幕時回到桌面，會自動把影片縮成子母畫面
+        panel.querySelector('.vp-full').onclick = () => {
+            playTone('click');
+            video.play().catch(() => {});
+            try {
+                if (video.requestFullscreen) video.requestFullscreen().catch(() => {});
+                else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); // iPhone 的 Safari
+            } catch (err) {}
+        };
 
         videoPip = { canvas, video, panel, stream: null, openedAt: Date.now() };
         drawPipCanvas(); // 先畫一張，串流才有畫面
@@ -2034,7 +2052,9 @@ async function openVideoPip() {
             const vp = videoPip;
             if (!vp || vp.video !== video) return;
             video.play().catch(() => {});
-            if (Date.now() - vp.openedAt > 1000) toggleTimer(); // 剛開啟時瀏覽器自己觸發的暫停不算
+            // 剛開啟時瀏覽器自己觸發的暫停不算。手機上關掉小視窗也會觸發暫停，分不出是不是使用者按的，
+            // 所以手機只靠下面的 Media Session 按鍵控制計時
+            if (!IS_TOUCH && Date.now() - vp.openedAt > 1000) toggleTimer();
         });
         // Chrome／Safari 的子母畫面會改走 Media Session 的按鍵
         setMediaSessionHandlers({ play: toggleTimer, pause: toggleTimer, nexttrack: () => document.getElementById('skipBtn').click() });
