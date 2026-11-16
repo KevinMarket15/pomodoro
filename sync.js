@@ -1,8 +1,7 @@
 /* --- 雲端同步（Firebase：Google 登入 + Firestore） ---
  * 資料仍以 localStorage 為主，這裡只負責和雲端互相同步：
- *   users/{uid}/kv/{名稱}   任務庫、行程、時長設定，各一份（以最後寫入為準）
+ *   users/{uid}/kv/{名稱}   任務庫、行程、時長設定、計時狀態，各一份（以最後寫入為準；計時狀態另外比版本時間）
  *   users/{uid}/logs/{id}   每筆時間記錄一份，兩台裝置的記錄會合併（今日蕃茄數由記錄算出）
- * 正在進行的計時狀態不同步。
  *
  * 記錄保留一年，可能有幾千筆。為了不要每次開網頁都把全部讀一遍（免費額度有每日讀取上限）：
  *   - 平常只即時監聽最近 LOG_WINDOW_DAYS 天的記錄
@@ -19,7 +18,7 @@ const FULL_SYNC_DAYS = 7;   // 每隔幾天完整核對一次（必須小於上�
 const app = window.pomodoroApp;
 const K = app.keys;
 // 雲端文件名稱 ↔ localStorage key
-const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer };
+const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer, state: K.state };
 const KV_NAME = Object.fromEntries(Object.entries(KV).map(([name, key]) => [key, name]));
 
 let fb = null;            // 載入後的 Firebase 函式
@@ -122,6 +121,16 @@ async function flush() {
 async function pushKv(key) {
     const ref = fb.doc(db, 'users', uid, 'kv', KV_NAME[key]);
     const value = localStorage.getItem(key);
+    // 有版本時間的資料（計時狀態）：雲端的比較新就不要蓋過去，改成採用雲端的
+    const localRev = app.revOf(key, value);
+    if (localRev !== null) {
+        const snap = await fb.getDoc(ref);
+        if (snap.exists() && app.revOf(key, snap.data().value) > localRev) {
+            clearDirty(key);
+            applyLocal(key, snap.data().value);
+            return;
+        }
+    }
     if (value === null) await fb.deleteDoc(ref);
     else await fb.setDoc(ref, { value, updatedAt: Date.now() });
 }
@@ -160,8 +169,15 @@ function onKvSnapshot(snap) {
     const dirty = readMeta().dirty;
     snap.docChanges().forEach(change => {
         const key = KV[change.doc.id];
-        if (!key || dirty[key]) return; // 本機有還沒傳上去的修改：以本機為準
-        applyLocal(key, change.type === 'removed' ? null : change.doc.data().value);
+        if (!key) return;
+        const value = change.type === 'removed' ? null : change.doc.data().value;
+        if (dirty[key]) {
+            // 本機有還沒傳上去的修改：以本機為準。例外是有版本時間的資料，雲端比較新就採用雲端的
+            const localRev = app.revOf(key, localStorage.getItem(key));
+            if (localRev === null || value === null || app.revOf(key, value) <= localRev) return;
+            clearDirty(key);
+        }
+        applyLocal(key, value);
     });
     refreshStatus();
 }

@@ -439,4 +439,6 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
     }
     .sheet .modal-section { margin-bottom: 0; }
 }
-.video-pip-panel .vp-full { width: 100%; margin-top: 10px; }
+
+/* 手機不提供懸浮視窗（看通知列的常駐通知就好） */
+@media (pointer: coarse) { .fab-items .float-fab { display: none; } }

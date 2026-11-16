@@ -224,6 +224,7 @@ let wakeLock = null;  // 計時中不讓螢幕自動關閉
 let logCache = { raw: null, logs: [] }; // 時間記錄的解析快取，見 loadLogs
 let lastTimesRefresh = 0; // 上次更新行程卡片「今日已花時間」的時間點
 let statusSig = '';       // 目前顯示中的常駐通知內容，內容沒變就不重發
+let forcedRev = 0;        // 見 saveTimerState：自動結束時，狀態的版本時間用「預計結束時間」而不是現在
 const NOTIFY_TAG = 'pomodoro-phase';   // 「時間到」的通知
 const STATUS_TAG = 'pomodoro-status';  // 計時中的常駐通知
 
@@ -460,7 +461,11 @@ function refreshScheduleTimes() {
 }
 
 function saveTimerState() {
-    localStorage.setItem(STORAGE_KEY_STATE, JSON.stringify({ mode, timeLeft, endTime, elapsed, countStart, isRunning, session }));
+    // 計時狀態也會同步到其他裝置。rev 是這個狀態的版本時間，兩台裝置的狀態衝突時新的贏：
+    // 使用者按下去的操作用現在的時間；時間到自動結束則用「預計結束時間」。
+    // 這樣一台睡著的手機醒來後補做的「自動結束」，不會蓋掉另一台之後才按的操作。
+    const rev = forcedRev || Date.now();
+    storeSet(STORAGE_KEY_STATE, JSON.stringify({ mode, timeLeft, endTime, elapsed, countStart, isRunning, session, rev }));
     updateStatusNotification();
 }
 
@@ -618,10 +623,13 @@ function advancePhase(completed) {
 
 function finishPhase() {
     const finished = mode;
-    stopTimer(); endSession(true);
-    advancePhase(true); // 切到下一段；預設停在那裡等使用者按開始
     const auto = !!timerSettings.autoStart;
-    if (auto) startTimer();
+    forcedRev = endTime || Date.now();
+    try {
+        stopTimer(); endSession(true);
+        advancePhase(true); // 切到下一段；預設停在那裡等使用者按開始
+        if (auto) startTimer();
+    } finally { forcedRev = 0; }
     announce(finished === 'focus'
         ? `專注結束！接下來是${MODE_LABELS[mode]}（${formatTime(timerSettings[mode])}）`
         : (auto ? '休息結束，下一顆蕃茄開始了！' : '休息結束，準備開始下一顆蕃茄！'), auto);
@@ -1969,10 +1977,10 @@ function updateFloating() {
 window.openFloating = async function() {
     playTone('click');
     if (pipWindow) { pipWindow.focus(); return; }
-    if (window.documentPictureInPicture) {
-        try { await openDocPip(); return; } catch (err) { /* 失敗就改用影片子母畫面 */ }
-    }
-    await openVideoPip();
+    // 優先用播放器的子母畫面（Chrome／Edge 會直接跳出；Firefox 沒有這個功能，會顯示面板請使用者自己按）
+    const canVideoPip = document.pictureInPictureEnabled && 'requestPictureInPicture' in HTMLVideoElement.prototype;
+    if (canVideoPip || !window.documentPictureInPicture) { await openVideoPip(); return; }
+    try { await openDocPip(); } catch (err) { await openVideoPip(); }
 };
 
 // Chrome/Edge：可以放按鈕的置頂小視窗
@@ -2021,27 +2029,16 @@ async function openVideoPip() {
         panel.className = 'video-pip-panel';
         panel.innerHTML = `
             <button class="modal-close" title="關閉懸浮時間">×</button>
-            <div class="vp-hint">${IS_TOUCH
-                ? `手機：按下面的「全螢幕」，再按手機的<b>主畫面鍵</b>（或上滑回桌面），時間就會縮成小視窗浮在其他 App 上面。`
-                : `把滑鼠移到下方畫面上，按右側出現的「子母畫面」按鈕（或按 <b>Ctrl+Shift+]</b>），時間就會浮在所有視窗上方。<br>
-                   小視窗上的<b>暫停鍵</b>可以開始／暫停計時。<br>
-                   這個面板要留著，關掉會一起關閉懸浮時間。`}
-            </div>
-            <button class="action-btn vp-full">⛶ 全螢幕</button>`;
+            <div class="vp-hint">
+                把滑鼠移到下方畫面上，按右側出現的「子母畫面」按鈕（或按 <b>Ctrl+Shift+]</b>），時間就會浮在所有視窗上方。<br>
+                小視窗上的<b>暫停鍵</b>可以開始／暫停計時。<br>
+                這個面板要留著，關掉會一起關閉懸浮時間。
+            </div>`;
         const video = document.createElement('video');
         video.muted = true; video.playsInline = true;
         panel.appendChild(video);
         document.body.appendChild(panel);
         panel.querySelector('.modal-close').onclick = () => closeVideoPip();
-        // 全螢幕顯示時間。手機瀏覽器在影片全螢幕時回到桌面，會自動把影片縮成子母畫面
-        panel.querySelector('.vp-full').onclick = () => {
-            playTone('click');
-            video.play().catch(() => {});
-            try {
-                if (video.requestFullscreen) video.requestFullscreen().catch(() => {});
-                else if (video.webkitEnterFullscreen) video.webkitEnterFullscreen(); // iPhone 的 Safari
-            } catch (err) {}
-        };
 
         videoPip = { canvas, video, panel, stream: null, openedAt: Date.now() };
         drawPipCanvas(); // 先畫一張，串流才有畫面
@@ -2135,9 +2132,28 @@ function drawPipCanvas() {
     ctx.fillText(isRunning ? '計時中 · 按暫停鍵可暫停' : (session ? '已暫停 · 按暫停鍵繼續' : '按暫停鍵開始'), W / 2, 318);
 }
 
+// 套用另一台裝置傳來的計時狀態（已經寫進 localStorage）
+function adoptRemoteTimerState() {
+    isRunning = false;
+    clearInterval(tickTimer); clearTimeout(finishTimer);
+    const s = readStoredJSON(STORAGE_KEY_STATE);
+    session = null;
+    if (s && s.session) timerSettings.countUp = !!s.session.countUp; // 倒數／正數跟著那一段走
+    if (!s) { timeLeft = timerSettings[mode]; elapsed = 0; }          // 對方重置了全部資料
+    if (s && s.isRunning) { hideToast(); stopAttention(); }
+    restoreTimerState();
+    updateWakeLock();
+}
+
 /* --- 8. 給同步模組 (sync.js) 用的介面 --- */
 window.pomodoroApp = {
-    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, logs: STORAGE_KEY_LOG },
+    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG },
+
+    // 計時狀態的版本時間（越大越新）；其他資料沒有版本，回傳 null
+    revOf(key, value) {
+        if (key !== STORAGE_KEY_STATE) return null;
+        try { return Number(JSON.parse(value || 'null').rev) || 0; } catch (err) { return 0; }
+    },
     loadLogs, saveLogs,
 
     // 預設類別還沒存過時先存起來，才有東西可以上傳
@@ -2152,6 +2168,9 @@ window.pomodoroApp = {
         }
         if (key === STORAGE_KEY_CATS) renderCategoriesFromStorage();
         else if (key === STORAGE_KEY_SCHED) renderScheduleFromStorage();
+        // 另一台裝置開始、暫停或切換了計時：照它的狀態接續。
+        // 排到稍後再做，這樣接續後如果馬上發現時間已到而結束，產生的變動才會正常同步出去
+        else if (key === STORAGE_KEY_STATE) setTimeout(adoptRemoteTimerState, 0);
         else if (key === STORAGE_KEY_LOG) {
             updateModeUI(); // 今日蕃茄數是從記錄算的
             if (document.getElementById('logModal').classList.contains('show')) renderLogModal();
