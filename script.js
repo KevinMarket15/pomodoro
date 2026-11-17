@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.17.3';
+const APP_VERSION = '2026.11.17.4';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -172,6 +172,7 @@ function cleanLog(l) {
         plannedSec: num(l.plannedSec), actualSec: num(l.actualSec), completed: !!l.completed
     };
     if (l.countUp) { entry.countUp = true; entry.pomodoros = Math.floor(num(l.pomodoros)); }
+    if (l.manual) entry.manual = true; // 事後補登的
     return entry;
 }
 function readStoredJSON(key) {
@@ -1496,7 +1497,8 @@ function logRow(l) {
         type: modeLabel(l.mode, !!l.countUp),
         task: l.mode === 'focus' ? (l.task || '（未指定）') : '—',
         planned: l.countUp ? '—' : minutesText(l.plannedSec), actual: minutesText(l.actualSec),
-        status: !l.completed ? '中斷' : (l.countUp && l.mode === 'focus' ? `完成（${pomodorosOf(l)} 🍅）` : '完成')
+        status: l.manual ? `補登（${pomodorosOf(l)} 🍅）`
+            : !l.completed ? '中斷' : (l.countUp && l.mode === 'focus' ? `完成（${pomodorosOf(l)} 🍅）` : '完成')
     };
 }
 
@@ -3574,6 +3576,81 @@ document.getElementById('remCalendar').addEventListener('click', addReminderToCa
     if (e.key === 'Enter') { e.preventDefault(); saveReminderForm(); }
 }));
 
+
+/* --- 補登：有做事但忘了計時，事後把專注時間加進記錄 --- */
+// 補登的一筆當成「正數」記錄：每滿一段專注時長算一顆蕃茄，點數也照算；manual 標示是補登的
+function openManualLog() {
+    fillTaskDatalist();
+    const isToday = logViewDate === todayKey();
+    const mins = 25;
+    // 預設「現在往前推 25 分鐘」；補別天的時候預設 09:00
+    const start = isToday ? new Date(Date.now() - mins * 60000) : new Date(`${logViewDate}T09:00`);
+    document.getElementById('mlTitle').textContent = `補登專注（${logViewDate} ${weekdayText(logViewDate)}）`;
+    document.getElementById('mlTime').value = clockText(start.getTime());
+    document.getElementById('mlMin').value = mins;
+    document.getElementById('mlTask').value = isToday ? getCurrentTask() : '';
+    document.getElementById('mlMsg').textContent = '';
+    updateManualNote();
+    toggleModal(true, 'manualLogModal');
+    document.getElementById('mlTask').focus();
+}
+function manualPomodoros(sec) {
+    return sec >= MIN_POMODORO_SEC ? Math.floor(sec / Math.max(MIN_POMODORO_SEC, timerSettings.focus)) : 0;
+}
+function updateManualNote() {
+    const min = Number(document.getElementById('mlMin').value);
+    const note = document.getElementById('mlNote');
+    if (!(min > 0)) { note.textContent = ''; return; }
+    const n = manualPomodoros(Math.round(min * 60));
+    const per = Math.round(Math.max(MIN_POMODORO_SEC, timerSettings.focus) / 60);
+    note.textContent = n ? `算 ${n} 顆蕃茄（每滿 ${per} 分鐘一顆），獎勵點數照算` : `不滿 ${per} 分鐘：只記時間，不算蕃茄和點數`;
+}
+function saveManualLog() {
+    const msg = document.getElementById('mlMsg');
+    const time = cleanTime(document.getElementById('mlTime').value);
+    const min = Math.round(Number(document.getElementById('mlMin').value));
+    const task = cleanText(document.getElementById('mlTask').value.trim().slice(0, 100));
+    if (!time) { msg.textContent = '請填開始時間'; document.getElementById('mlTime').focus(); return; }
+    if (!(min >= 1 && min <= 720)) { msg.textContent = '分鐘數請填 1 到 720'; document.getElementById('mlMin').focus(); return; }
+    const start = new Date(`${logViewDate}T${time}`).getTime();
+    const end = start + min * 60000;
+    if (!Number.isFinite(start)) { msg.textContent = '時間格式不對'; return; }
+    if (end > Date.now() + 60000) { msg.textContent = '結束時間還沒到，不能補登未來的時間'; return; }
+    const logs = loadLogs();
+    const clash = logs.find(l => l.mode === 'focus' && l.start < end && l.end > start);
+    if (clash) { msg.textContent = `和 ${clockText(clash.start)}–${clockText(clash.end)} 的專注記錄重疊了，請調整時間`; return; }
+    let s = start; // 同步用「開始時間＋類型」當編號，不能重複
+    while (logs.some(l => l.mode === 'focus' && l.start === s)) s++;
+    const actualSec = min * 60;
+    const pomodoros = manualPomodoros(actualSec);
+    logs.push({ start: s, end, mode: 'focus', task, plannedSec: actualSec, actualSec, completed: true, countUp: true, pomodoros, manual: true });
+    logs.sort((a, b) => a.start - b.start);
+    saveLogs(logs);
+    // 今天的補登：推進今日行程上還沒完成的同名卡片
+    let credited = '';
+    if (logViewDate === todayKey() && pomodoros > 0 && task) {
+        const card = [...document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder):not(.done)')]
+            .find(c => c.querySelector('.task-name').innerText === task);
+        if (card) { creditCard(card.dataset.id, pomodoros, `m${s}`); credited = '，行程進度也已推進'; }
+    }
+    playTone('click');
+    toggleModal(false, 'manualLogModal');
+    rerenderKey(STORAGE_KEY_LOG);
+    showToast(`已補登 ${min} 分鐘${pomodoros ? `（${pomodoros} 🍅）` : ''}${credited}`, null, null, 4000);
+}
+document.getElementById('mlSave').addEventListener('click', saveManualLog);
+document.getElementById('mlMin').addEventListener('input', updateManualNote);
+document.querySelectorAll('#mlQuick .seg-btn').forEach(b => b.addEventListener('click', () => {
+    playTone('click');
+    document.getElementById('mlMin').value = b.dataset.min;
+    if (logViewDate === todayKey()) // 今天：開始時間跟著改成「現在往前推」
+        document.getElementById('mlTime').value = clockText(Date.now() - Number(b.dataset.min) * 60000);
+    updateManualNote();
+}));
+['mlTime', 'mlMin', 'mlTask'].forEach(id => document.getElementById(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveManualLog(); }
+}));
+
 /* 已完成的任務：收成任務條下方的一行，點了才展開 */
 function updateDoneToggle() {
     const slotEl = document.getElementById('scheduleSlot'), btn = document.getElementById('doneToggle');
@@ -3658,6 +3735,7 @@ const ACTIONS = {
     'import-data': () => document.getElementById('importFile').click(),
     'log-prev': () => shiftLogDate(-1),
     'log-next': () => shiftLogDate(1),
+    'manual-log': () => openManualLog(),
     'export-csv': () => exportLog('csv'),
     'export-md': () => exportLog('md'),
     'copy-log': () => copyLog(),

@@ -580,3 +580,8 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 .reminder-time { font-weight: bold; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
 .reminder-name { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reminder-note { grid-column: 1 / -1; font-size: 0.68rem; color: var(--faint); }
+
+/* --- 補登：疊在時間記錄視窗上面 --- */
+#manualLogModal { z-index: 210; }
+#mlQuick { margin: 4px 0 8px; }
+#mlTime, #remTime { width: 9.5em; flex: none; }
