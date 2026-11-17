@@ -561,3 +561,22 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 .ex-summary { white-space: pre-line; line-height: 1.6; }
 #rateMode { align-self: flex-start; }
 .ac-field .text-input:disabled { opacity: 0.6; }
+
+/* --- 已完成收合、定時提醒 --- */
+#scheduleSlot:not(.show-done) .task-card.done { display: none; }
+.done-toggle { margin-top: 8px; opacity: 0.8; }
+.reminder-box { width: 100%; margin-top: 6px; }
+.reminder-head { display: flex; align-items: center; justify-content: space-between; font-size: 0.8rem; color: var(--muted); padding: 0 4px; }
+.reminder-head .clear-btn { padding: 6px 4px; }
+.reminder-empty { font-size: 0.72rem; color: var(--faint); text-align: center; padding: 4px; }
+.reminder-row {
+    display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 0 8px; width: 100%; text-align: left;
+    border: none; background: var(--bg-color); box-shadow: var(--small-outer); border-radius: 12px;
+    padding: 6px 10px; margin-top: 6px; cursor: pointer; color: var(--text-color); font: inherit;
+}
+.reminder-row:active { box-shadow: var(--inner-shadow); }
+.reminder-row.past { opacity: 0.55; box-shadow: none; }
+.reminder-row.upcoming .reminder-time { color: var(--accent-color); }
+.reminder-time { font-weight: bold; font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+.reminder-name { font-size: 0.85rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reminder-note { grid-column: 1 / -1; font-size: 0.68rem; color: var(--faint); }

@@ -20,7 +20,7 @@ const FULL_SYNC_DAYS = 7;   // 每隔幾天完整核對一次（必須小於上�
 const app = window.pomodoroApp;
 const K = app.keys;
 // 雲端文件名稱 ↔ localStorage key
-const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer, state: K.state, rewards: K.rewards };
+const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer, state: K.state, rewards: K.rewards, reminders: K.reminders };
 const KV_NAME = Object.fromEntries(Object.entries(KV).map(([name, key]) => [key, name]));
 
 let fb = null;            // 載入後的 Firebase 函式

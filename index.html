@@ -373,6 +373,49 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="reminderModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title" id="remTitle">新增提醒</div>
+            <div class="setting-row">
+                <span class="setting-label">時間</span>
+                <input type="time" class="text-input rw-num" id="remTime" aria-label="提醒時間">
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">要做什麼</span>
+                <input type="text" class="text-input" id="remName" maxlength="100" list="remTaskList" placeholder="例如：倒垃圾">
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">接著做<small>選填：按「開始」時一起排在後面</small></span>
+                <input type="text" class="text-input" id="remNext" maxlength="100" list="remTaskList" placeholder="例如：吃飯">
+            </div>
+            <datalist id="remTaskList"></datalist>
+            <div class="setting-row setting-col">
+                <span class="setting-label">重複<small id="remDaysNote"></small></span>
+                <div class="seg day-seg" id="remDays">
+                    <button class="seg-btn" data-day="1">一</button>
+                    <button class="seg-btn" data-day="2">二</button>
+                    <button class="seg-btn" data-day="3">三</button>
+                    <button class="seg-btn" data-day="4">四</button>
+                    <button class="seg-btn" data-day="5">五</button>
+                    <button class="seg-btn" data-day="6">六</button>
+                    <button class="seg-btn" data-day="0">日</button>
+                </div>
+            </div>
+            <div class="rw-msg bad" id="remMsg" role="status"></div>
+            <div class="data-actions">
+                <button class="action-btn export" id="remSave">儲存</button>
+                <button class="action-btn" id="remCalendar">📅 加到 Google 日曆</button>
+            </div>
+            <div class="data-actions">
+                <button class="action-btn danger" id="remDelete">刪除提醒</button>
+            </div>
+            <div class="setting-note">時間到會響鈴、跳通知，提示列上按「開始」就把它排到任務條最上面。網頁要還開著才響得了：手機關掉螢幕又沒在計時的時候會被暫停，重要的提醒請按「加到 Google 日曆」，由日曆 App 準時通知。</div>
+        </div>
+    </div>
+</div>
+
 <div class="modal-overlay" id="helpModal">
     <div class="modal-content">
         <button class="modal-close">×</button>
@@ -396,6 +439,8 @@
                 <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
                 <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完（照行程順序計算，含休息時間）。點卡片可以看那一張預計幾點做完。</li>
                 <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
+                <li><strong>定時提醒：</strong>任務條下方「⏰ 定時提醒」按「＋ 新增」，設定時間、要做什麼（可以再設「接著做」）與每週哪幾天。時間到會響鈴、跳通知，按提示列的「開始」就排到任務條最上面。網頁被暫停時不會響，重要的提醒可以按「📅 加到 Google 日曆」。</li>
+                <li><strong>已完成的任務：</strong>會收在任務條下方的「✓ 已完成 N 項」，點一下展開或收起。</li>
                 <li><strong>獎勵：</strong>按右上角 🎁 或計時器下方的 ⭐。完成蕃茄後依任務類別與專注分鐘數賺點數（可以自己調整每個類別每 15 分鐘幾點），用點數在商店兌換你自己設定的獎勵，例如「玩 30 分鐘手遊」；也可以把星星存進自己設定的帳戶（娛樂、購物…）換成錢，吃飯這類必要帳戶可以設每月底薪；花錢時記一筆支出（可以透支），帳戶之間也能轉帳。累計的點數越多等級越高。</li>
                 <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。也可以把資料存到 Google 雲端硬碟，讓有連接雲端硬碟的 AI 直接讀取。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
@@ -486,9 +531,17 @@
         <div class="groove-header">今日行程</div>
         <div class="groove-plan" id="schedulePlan"></div>
         <div class="groove-track" id="scheduleSlot"></div>
+        <button class="clear-btn done-toggle" id="doneToggle" style="display:none"></button>
         <div class="groove-actions">
             <button class="clear-btn" data-action="clear-schedule">清空行程</button>
             <button class="clear-btn log-btn" data-action="open-log">時間記錄</button>
+        </div>
+        <div class="reminder-box">
+            <div class="reminder-head">
+                <span>⏰ 定時提醒</span>
+                <button class="clear-btn log-btn" id="reminderAdd">＋ 新增</button>
+            </div>
+            <div id="reminderList"></div>
         </div>
     </div>
 

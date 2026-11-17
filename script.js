@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.17.2';
+const APP_VERSION = '2026.11.17.3';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -99,6 +99,8 @@ const STORAGE_KEY_SCHED = 'pomodoro_schedule_v4';
 const STORAGE_KEY_TIMER = 'pomodoro_timer_v5';
 const STORAGE_KEY_STATE = 'pomodoro_state_v5'; // 計時狀態，重新整理後可接續
 const STORAGE_KEY_LOG = 'pomodoro_log_v1';     // 時間記錄
+const STORAGE_KEY_REMIND = 'pomodoro_reminders_v1'; // 定時提醒
+const REMIND_FIRED_KEY = 'pomodoro_reminder_fired'; // 這台裝置今天已經響過的提醒（不同步）
 const LOG_KEEP_DAYS = 365;
 const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 // 獎勵（點數、商店、等級）。這幾個常數放在這裡，因為載入時 restoreTimerState() 就會用到（更新點數顯示）
@@ -259,6 +261,7 @@ let statusSig = '';       // 目前顯示中的常駐通知內容，內容沒變
 let forcedRev = 0;        // 見 saveTimerState：自動結束時，狀態的版本時間用「預計結束時間」而不是現在
 const NOTIFY_TAG = 'pomodoro-phase';   // 「時間到」的通知
 const STATUS_TAG = 'pomodoro-status';  // 計時中的常駐通知
+const REMIND_TAG = 'pomodoro-remind';  // 定時提醒的通知（點了只回到網頁，不會開始計時）
 
 let keepAliveAudio = null;    // 手機背景保持計時用的靜音音訊，見 updateKeepAlive
 let keepAliveStopTimer = null;
@@ -365,15 +368,15 @@ async function getSwRegistration() {
     try { return 'serviceWorker' in navigator ? await navigator.serviceWorker.getRegistration() : null; }
     catch (err) { return null; }
 }
-async function notify(body) {
+async function notify(body, tag = NOTIFY_TAG) {
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
-    const options = { body, tag: NOTIFY_TAG, renotify: true, icon: 'icons/icon-192.png' };
+    const options = { body, tag, renotify: true, icon: 'icons/icon-192.png' };
     const reg = await getSwRegistration();
     // 手機瀏覽器只能透過 service worker 發通知
     if (reg && reg.active) { try { await reg.showNotification('蕃茄鐘', options); return; } catch (err) {} }
     try {
         const n = new Notification('蕃茄鐘', options);
-        n.onclick = () => { window.focus(); n.close(); startFromPrompt(); };
+        n.onclick = () => { window.focus(); n.close(); if (tag === NOTIFY_TAG) startFromPrompt(); };
     } catch (err) {}
 }
 async function clearNotifications() {
@@ -840,6 +843,7 @@ if ('serviceWorker' in navigator) {
         if (!e.data || e.data.type !== 'notification-click') return;
         // 點常駐通知只是回到網頁（系統會把通知收掉，這裡補發一則）；點「時間到」的通知才開始下一段
         if (e.data.tag === STATUS_TAG) { statusSig = ''; updateStatusNotification(); }
+        else if (e.data.tag === REMIND_TAG) { /* 定時提醒：回到網頁就好，提示列上有「開始」 */ }
         else startFromPrompt();
     });
     if (location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -894,6 +898,7 @@ function saveSchedule() {
     });
     storeSet(STORAGE_KEY_SCHED, JSON.stringify(schedule));
     updateCurrentTask();
+    updateDoneToggle();
 }
 
 /* --- 4. 動態 DOM --- */
@@ -913,6 +918,7 @@ function renderScheduleFromStorage() {
     kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null, t.est, t.id, t));
     if (kept.length !== items.length) saveSchedule();
     updateCurrentTask();
+    updateDoneToggle();
 }
 
 function renderCategoriesFromStorage() {
@@ -1144,6 +1150,7 @@ window.resetToDefault = async function() {
     localStorage.removeItem(STORAGE_KEY_STATE);
     localStorage.removeItem(STORAGE_KEY_LOG);
     localStorage.removeItem(STORAGE_KEY_REWARDS);
+    localStorage.removeItem(STORAGE_KEY_REMIND);
     location.reload();
 }
 
@@ -2425,6 +2432,10 @@ function mergeStored(key, baseStr, localStr, remoteStr) {
         return JSON.stringify(mergeList(prep(baseStr), prep(localStr), prep(remoteStr)));
     }
     if (key === STORAGE_KEY_REWARDS) return mergeRewards(baseStr, localStr, remoteStr);
+    if (key === STORAGE_KEY_REMIND) {
+        const prep = s => withIds(cleanReminders(parse(s)), r => r.id);
+        return JSON.stringify(mergeList(prep(baseStr), prep(localStr), prep(remoteStr)));
+    }
     return localStr;
 }
 
@@ -3336,9 +3347,251 @@ function mergeRewards(baseStr, localStr, remoteStr) {
     return JSON.stringify(out);
 }
 
+/* --- 定時提醒：例如「每週一三五 18:00 倒垃圾，接著吃飯」 ---
+ * 資料（pomodoro_reminders_v1，會同步）：[{id, time: 'HH:MM', name, days: [星期幾，0＝週日], date（沒選星期幾時：只有這一天）, next（接著排入的任務）}]
+ * 響過的提醒記在這台裝置（pomodoro_reminder_fired），每台裝置各自提醒。
+ * 網頁要還在執行才響得了：手機關掉螢幕、又沒在計時的時候會被暫停，所以另外提供「加到 Google 日曆」。 */
+function cleanTime(v) {
+    const m = typeof v === 'string' && v.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const h = Number(m[1]), mi = Number(m[2]);
+    return h < 24 && mi < 60 ? `${String(h).padStart(2, '0')}:${m[2]}` : null;
+}
+function cleanReminders(raw) {
+    if (!Array.isArray(raw)) return [];
+    const seen = new Set();
+    return raw.slice(0, 100).filter(x => x && typeof x === 'object').map(x => {
+        const days = Array.isArray(x.days) ? [...new Set(x.days.filter(d => Number.isInteger(d) && d >= 0 && d <= 6))].sort() : [];
+        const out = { id: cleanText(x.id, 40) || newItemId(), time: cleanTime(x.time), name: cleanText(x.name, 100), days };
+        if (!days.length) out.date = typeof x.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(x.date) ? x.date : todayKey();
+        const next = cleanText(x.next, 100);
+        if (next) out.next = next;
+        return out;
+    }).filter(x => x.time && x.name && !seen.has(x.id) && seen.add(x.id));
+}
+function loadReminders() { return cleanReminders(readStoredJSON(STORAGE_KEY_REMIND)); }
+function saveReminders(list) { storeSet(STORAGE_KEY_REMIND, JSON.stringify(list)); }
+function remindsOn(rem, date) { return rem.days.length ? rem.days.includes(new Date(`${date}T00:00`).getDay()) : rem.date === date; }
+function remindAt(rem, date) { return new Date(`${date}T${rem.time}`).getTime(); }
+function readFired() { try { return JSON.parse(localStorage.getItem(REMIND_FIRED_KEY) || '{}') || {}; } catch (err) { return {}; } }
+function markFired(id) {
+    const f = readFired(), today = todayKey();
+    f[id] = today;
+    Object.keys(f).forEach(k => { if (f[k] !== today) delete f[k]; });
+    localStorage.setItem(REMIND_FIRED_KEY, JSON.stringify(f));
+}
+// 任務在任務庫裡的顏色與預估顆數（找不到就用灰色、1 顆）
+function taskInfo(name) {
+    for (const c of cleanCategories(readStoredJSON(STORAGE_KEY_CATS) || [])) {
+        if (c.tasks.includes(name)) return { color: c.color, est: c.meta[name] ? c.meta[name].est : 1 };
+    }
+    return { color: '#999999', est: 1 };
+}
+
+// 每 15 秒、以及切回網頁時檢查一次
+function checkReminders() {
+    if (!isUnlocked()) return;
+    const now = Date.now(), today = todayKey(), fired = readFired();
+    loadReminders().forEach(rem => {
+        if (!remindsOn(rem, today) || fired[rem.id] === today) return;
+        const at = remindAt(rem, today);
+        if (now < at) return;
+        markFired(rem.id);
+        if (now - at > 3 * 3600 * 1000) return; // 超過 3 小時才打開網頁的，就不補提醒了
+        fireReminder(rem, at);
+    });
+    renderReminders();
+}
+function fireReminder(rem, at) {
+    playTone('alarm');
+    setTimeout(() => playTone('alarm'), 700);
+    setTimeout(() => playTone('alarm'), 1400);
+    const late = Date.now() - at > 2 * 60 * 1000 ? `（${rem.time} 的提醒）` : '';
+    const msg = `⏰ ${rem.time} ${rem.name}${rem.next ? `，接著${rem.next}` : ''}${late}`;
+    showToast(msg, '開始', () => startReminder(rem), 10 * 60 * 1000);
+    if (document.hidden || !document.hasFocus()) { startAttention(); notify(msg, REMIND_TAG); }
+}
+// 按「開始」：把提醒的任務（和接著的任務）放到任務條最上面
+function startReminder(rem) {
+    const slotEl = document.getElementById('scheduleSlot');
+    const first = slotEl.querySelector('.task-card:not(.drop-placeholder)');
+    const a = taskInfo(rem.name);
+    const card = appendScheduleCard(rem.name, a.color, first, null, a.est);
+    if (rem.next) { const b = taskInfo(rem.next); appendScheduleCard(rem.next, b.color, card.nextSibling, null, b.est); }
+    playTone('drop');
+    saveSchedule();
+    refreshScheduleTimes();
+}
+
+function renderReminders() {
+    const box = document.getElementById('reminderList');
+    if (!box) return;
+    const list = loadReminders();
+    // 過期的單次提醒自動刪掉
+    const today = todayKey();
+    const kept = list.filter(r => r.days.length || r.date >= today);
+    if (kept.length !== list.length) saveReminders(kept);
+    const fired = readFired(), now = Date.now();
+    // 行程預計做完的時間：提醒落在這之前，表示行程會經過它
+    const etas = [...document.querySelectorAll('#scheduleSlot .task-card:not(.done)')].map(c => Number(c.dataset.eta) || 0);
+    const planEnd = etas.length ? Math.max(...etas) : 0;
+    box.innerHTML = '';
+    if (!kept.length) {
+        box.appendChild(rewardEl('div', 'reminder-empty', '還沒有提醒，例如「18:00 倒垃圾」'));
+        return;
+    }
+    kept.slice().sort((a, b) => a.time.localeCompare(b.time)).forEach(rem => {
+        const row = rewardEl('button', 'reminder-row');
+        const isToday = remindsOn(rem, today), at = remindAt(rem, today);
+        if (isToday && fired[rem.id] !== today && at > now) row.classList.add('upcoming');
+        if (!isToday || fired[rem.id] === today || at <= now) row.classList.add('past');
+        row.appendChild(rewardEl('span', 'reminder-time', rem.time));
+        row.appendChild(rewardEl('span', 'reminder-name', rem.name + (rem.next ? ` → ${rem.next}` : '')));
+        let note = rem.days.length ? repeatText(rem.days) : (rem.date === today ? '今天' : shortDate(rem.date));
+        if (isToday) {
+            if (fired[rem.id] === today || at <= now) note += ' · 已提醒';
+            else {
+                const min = Math.round((at - now) / 60000);
+                note += ` · 還有 ${min >= 60 ? `${Math.floor(min / 60)} 小時 ${min % 60} 分` : `${min} 分`}`;
+                if (planEnd > at) note += ' · 行程會經過';
+            }
+        }
+        row.appendChild(rewardEl('span', 'reminder-note', note));
+        row.addEventListener('click', () => { playTone('click'); openReminderEditor(rem); });
+        box.appendChild(row);
+    });
+}
+
+/* 新增／編輯提醒的視窗 */
+let remEditing = null, remDays = new Set();
+function fillTaskDatalist() {
+    const dl = document.getElementById('remTaskList');
+    dl.innerHTML = '';
+    const names = new Set();
+    cleanCategories(readStoredJSON(STORAGE_KEY_CATS) || []).forEach(c => c.tasks.forEach(t => names.add(t)));
+    names.forEach(n => { const o = document.createElement('option'); o.value = n; dl.appendChild(o); });
+}
+function renderRemDays() {
+    document.querySelectorAll('#remDays .seg-btn').forEach(b => b.classList.toggle('active', remDays.has(Number(b.dataset.day))));
+    document.getElementById('remDaysNote').textContent = remDays.size ? `每週${repeatText([...remDays])}提醒` : '沒選星期幾：只有今天提醒一次';
+}
+function openReminderEditor(rem) {
+    remEditing = rem || null;
+    remDays = new Set(rem ? rem.days : []);
+    fillTaskDatalist();
+    document.getElementById('remTitle').textContent = rem ? '編輯提醒' : '新增提醒';
+    document.getElementById('remTime').value = rem ? rem.time : '';
+    document.getElementById('remName').value = rem ? rem.name : '';
+    document.getElementById('remNext').value = rem && rem.next ? rem.next : '';
+    document.getElementById('remDelete').style.display = rem ? '' : 'none';
+    document.getElementById('remMsg').textContent = '';
+    renderRemDays();
+    toggleModal(true, 'reminderModal');
+    if (!rem) document.getElementById('remTime').focus();
+}
+function readReminderForm() {
+    const time = cleanTime(document.getElementById('remTime').value);
+    const name = document.getElementById('remName').value.trim().slice(0, 100);
+    const next = document.getElementById('remNext').value.trim().slice(0, 100);
+    const msg = document.getElementById('remMsg');
+    if (!time) { msg.textContent = '請選擇時間'; document.getElementById('remTime').focus(); return null; }
+    if (!name) { msg.textContent = '請填要做什麼'; document.getElementById('remName').focus(); return null; }
+    const rem = { id: remEditing ? remEditing.id : newItemId(), time, name, days: [...remDays].sort() };
+    if (!rem.days.length) rem.date = todayKey();
+    if (next) rem.next = next;
+    return rem;
+}
+function saveReminderForm() {
+    const rem = readReminderForm();
+    if (!rem) return;
+    const list = loadReminders().filter(r => r.id !== rem.id);
+    list.push(rem);
+    saveReminders(list);
+    // 改了時間：今天如果已經響過、但新的時間還沒到，讓它再響一次
+    const f = readFired();
+    if (f[rem.id] && remindAt(rem, todayKey()) > Date.now()) { delete f[rem.id]; localStorage.setItem(REMIND_FIRED_KEY, JSON.stringify(f)); }
+    playTone('click');
+    toggleModal(false, 'reminderModal');
+    renderReminders();
+    requestNotifyPermission();
+}
+function deleteReminder() {
+    if (!remEditing) return;
+    const removed = remEditing;
+    const before = localStorage.getItem(STORAGE_KEY_REMIND);
+    saveReminders(loadReminders().filter(r => r.id !== removed.id));
+    playTone('delete');
+    toggleModal(false, 'reminderModal');
+    renderReminders();
+    showToast(`已刪除提醒「${removed.name}」`, '復原', () => { if (before !== null) storeSet(STORAGE_KEY_REMIND, before); renderReminders(); }, 7000);
+}
+
+// 「加到 Google 日曆」：開一個預先填好的 Google 日曆活動頁面（不需要額外權限），儲存後由日曆 App 準時通知
+function calendarUrl(rem) {
+    const pad = n => String(n).padStart(2, '0');
+    const fmt = ms => { const d = new Date(ms); return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}T${pad(d.getHours())}${pad(d.getMinutes())}00`; };
+    let date = rem.date || todayKey();
+    if (rem.days.length) { // 第一個還沒過的日子
+        for (let i = 0; i < 8; i++) {
+            const d = addDays(todayKey(), i);
+            if (remindsOn(rem, d) && remindAt(rem, d) > Date.now()) { date = d; break; }
+        }
+    }
+    const start = remindAt(rem, date);
+    const params = new URLSearchParams({
+        action: 'TEMPLATE',
+        text: rem.name + (rem.next ? `，接著${rem.next}` : ''),
+        dates: `${fmt(start)}/${fmt(start + 15 * 60 * 1000)}`,
+        details: '由蕃茄鐘建立的提醒'
+    });
+    try { params.set('ctz', Intl.DateTimeFormat().resolvedOptions().timeZone); } catch (err) {}
+    if (rem.days.length) {
+        const codes = ['SU', 'MO', 'TU', 'WE', 'TH', 'FR', 'SA'];
+        params.set('recur', `RRULE:FREQ=WEEKLY;BYDAY=${rem.days.map(d => codes[d]).join(',')}`);
+    }
+    return `https://calendar.google.com/calendar/render?${params}`;
+}
+function addReminderToCalendar() {
+    const rem = readReminderForm();
+    if (!rem) return;
+    playTone('click');
+    window.open(calendarUrl(rem), '_blank', 'noopener');
+    document.getElementById('remMsg').textContent = '已開啟 Google 日曆。儲存活動後，記得確認通知時間設成「活動開始時」。提醒本身也記得按「儲存」。';
+}
+
+document.getElementById('reminderAdd').addEventListener('click', () => { playTone('click'); openReminderEditor(null); });
+document.getElementById('remDays').addEventListener('click', (e) => {
+    const b = e.target.closest('.seg-btn'); if (!b) return;
+    playTone('click');
+    const d = Number(b.dataset.day);
+    remDays.has(d) ? remDays.delete(d) : remDays.add(d);
+    renderRemDays();
+});
+document.getElementById('remSave').addEventListener('click', saveReminderForm);
+document.getElementById('remDelete').addEventListener('click', deleteReminder);
+document.getElementById('remCalendar').addEventListener('click', addReminderToCalendar);
+['remTime', 'remName', 'remNext'].forEach(id => document.getElementById(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveReminderForm(); }
+}));
+
+/* 已完成的任務：收成任務條下方的一行，點了才展開 */
+function updateDoneToggle() {
+    const slotEl = document.getElementById('scheduleSlot'), btn = document.getElementById('doneToggle');
+    if (!slotEl || !btn) return;
+    const n = slotEl.querySelectorAll('.task-card.done').length;
+    slotEl.classList.toggle('show-done', !!prefs.showDone);
+    btn.style.display = n ? '' : 'none';
+    btn.textContent = `✓ 已完成 ${n} 項 ${prefs.showDone ? '▴' : '▾'}`;
+}
+document.getElementById('doneToggle').addEventListener('click', () => {
+    playTone('click');
+    prefs.showDone = !prefs.showDone; savePrefs();
+    updateDoneToggle();
+});
+
 /* --- 8. 給同步模組 (sync.js) 用的介面 --- */
 window.pomodoroApp = {
-    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG, rewards: STORAGE_KEY_REWARDS },
+    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG, rewards: STORAGE_KEY_REWARDS, reminders: STORAGE_KEY_REMIND },
 
     // 雲端硬碟的檔案：內容與檔案編號（編號放在時長設定裡一起同步，兩台裝置寫同一個檔案）
     buildDriveText,
@@ -3346,7 +3599,7 @@ window.pomodoroApp = {
     setDriveFileId(id) { timerSettings.driveFileId = id; saveTimerSettings(); },
 
     // 可以逐項合併的資料（任務庫、行程）
-    mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED, STORAGE_KEY_REWARDS],
+    mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED, STORAGE_KEY_REWARDS, STORAGE_KEY_REMIND],
     merge: mergeStored,
 
     // 計時狀態的版本時間（越大越新）；其他資料沒有版本，回傳 null
@@ -3369,6 +3622,7 @@ window.pomodoroApp = {
         if (key === STORAGE_KEY_CATS) { renderCategoriesFromStorage(); updateRewardBadge(); } // 點數依任務所屬類別計算
         else if (key === STORAGE_KEY_SCHED) renderScheduleFromStorage();
         else if (key === STORAGE_KEY_REWARDS) updateRewardBadge();
+        else if (key === STORAGE_KEY_REMIND) renderReminders();
         // 另一台裝置開始、暫停或切換了計時：照它的狀態接續。
         // 排到稍後再做，這樣接續後如果馬上發現時間已到而結束，產生的變動才會正常同步出去
         else if (key === STORAGE_KEY_STATE) setTimeout(adoptRemoteTimerState, 0);
@@ -3442,6 +3696,10 @@ window.addEventListener('DOMContentLoaded', () => {
     // 這台裝置上次看到的是別的版本：提示已經更新（第一次開啟不提示）
     if (prefs.lastVersion && prefs.lastVersion !== APP_VERSION) showToast(`已更新到版本 ${APP_VERSION}`, null, null, 6000);
     if (prefs.lastVersion !== APP_VERSION) { prefs.lastVersion = APP_VERSION; savePrefs(); }
+    renderReminders();
+    setInterval(checkReminders, 15000);
+    setTimeout(checkReminders, 3000); // 等同步把別台裝置的提醒帶進來
+    document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReminders(); });
     setTimeout(checkNewDay, 2500); // 稍等一下，讓雲端同步先把別台裝置的最新狀態帶進來
     setTimeout(() => autoDriveSave(true), 9000); // 每次開啟也更新一次雲端硬碟的檔案（等同步連上之後）
 });
