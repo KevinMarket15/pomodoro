@@ -559,3 +559,5 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 .ex-nav { padding-right: 0; margin: 4px 0; justify-content: center; }
 .ex-nav span { min-width: 150px; text-align: center; }
 .ex-summary { white-space: pre-line; line-height: 1.6; }
+#rateMode { align-self: flex-start; }
+.ac-field .text-input:disabled { opacity: 0.6; }

@@ -223,6 +223,10 @@
                 <span class="setting-label">計時中顯示常駐通知<small>顯示結束時間，需要先允許通知</small></span>
                 <input type="checkbox" class="switch" id="setStatusNotify">
             </label>
+            <label class="setting-row">
+                <span class="setting-label">背景保持計時（手機）<small>計時中在背景播放聽不到的聲音，讓手機關掉螢幕時也能響鈴、跳通知；會多耗一點電</small></span>
+                <input type="checkbox" class="switch" id="setBgAudio">
+            </label>
             <div class="setting-note">外觀、提示音與常駐通知只影響這台裝置；其餘設定會同步到其他裝置。</div>
             <div class="setting-note app-version"></div>
         </div>
@@ -305,12 +309,31 @@
                 <button class="action-btn export" id="rwAdd">新增</button>
             </div>
             <details class="rw-details">
-                <summary>每顆蕃茄賺幾點</summary>
+                <summary>每 15 分鐘專注賺幾點</summary>
                 <div id="rwWeights"></div>
-                <div class="setting-note">依任務所在的類別計算，娛樂類可以設成 0 點。修改後，最近 7 天的點數會照新設定重算；更早的已經結算，不會改變。</div>
+                <div class="setting-note">依任務所在的類別、按實際專注分鐘數計算（例如 10 點的類別專注 30 分鐘得 20 點），蕃茄設多長都一樣公平；只有算成蕃茄的專注才有點數（不到 5 分鐘不算）。娛樂類可以設成 0 點。修改後，最近 7 天的點數會照新設定重算；更早的已經結算，不會改變。</div>
             </details>
             <details class="rw-details" id="fdSettings">
                 <summary>帳戶設定</summary>
+                <div class="setting-row setting-col">
+                    <span class="setting-label">匯率怎麼算</span>
+                    <div class="seg" id="rateMode">
+                        <button class="seg-btn" data-mode="goal">依每天目標</button>
+                        <button class="seg-btn" data-mode="history">依過去表現</button>
+                        <button class="seg-btn" data-mode="manual">手動</button>
+                    </div>
+                </div>
+                <div id="rateGoalBox">
+                    <div class="setting-row">
+                        <span class="setting-label">每天目標專注（分鐘）<small>做到目標剛好存滿每月上限</small></span>
+                        <input type="number" class="text-input rw-num" id="goalMin" min="15" max="1440" step="15" aria-label="每天目標專注分鐘數">
+                    </div>
+                    <div class="setting-row">
+                        <span class="setting-label">每月目標天數<small>預留休息的日子</small></span>
+                        <input type="number" class="text-input rw-num" id="goalDays" min="1" max="31" aria-label="每月目標天數">
+                    </div>
+                </div>
+                <div class="setting-note top" id="rateModeNote"></div>
                 <div id="acSettingsList"></div>
                 <div class="data-actions">
                     <button class="action-btn" id="acAdd">＋ 新增帳戶</button>
@@ -319,7 +342,7 @@
                 <div class="data-actions">
                     <button class="action-btn export" id="fdSaveSettings">儲存</button>
                 </div>
-                <div class="setting-note">「每月星星存入上限」是每個月最多能用星星換進這個帳戶的錢，填 0 表示不能存星星。「每月底薪」適合吃飯、交通這類必要開銷：每個月第一次打開時自動放進帳戶，不靠星星；當月還沒用完的底薪不能轉到別的帳戶。建議匯率＝所有帳戶的存入上限加總 ÷ 最近 30 天賺到的星星，照最近的努力程度剛好能把每個帳戶存滿。這只是幫你記帳，不會動到真正的錢。</div>
+                <div class="setting-note">「每月星星存入上限」是每個月最多能用星星換進這個帳戶的錢，填 0 表示不能存星星。匯率只有選「手動」時能直接改。「每月底薪」適合吃飯、交通這類必要開銷：每個月第一次打開時自動放進帳戶，不靠星星；當月還沒用完的底薪不能轉到別的帳戶。這只是幫你記帳，不會動到真正的錢。</div>
             </details>
             <details class="rw-details" id="exDetails">
                 <summary>匯出明細</summary>
@@ -373,7 +396,7 @@
                 <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
                 <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完（照行程順序計算，含休息時間）。點卡片可以看那一張預計幾點做完。</li>
                 <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
-                <li><strong>獎勵：</strong>按右上角 🎁 或計時器下方的 ⭐。每完成一顆蕃茄依任務類別賺點數（可以自己調整每個類別幾點），用點數在商店兌換你自己設定的獎勵，例如「玩 30 分鐘手遊」；也可以把星星存進自己設定的帳戶（娛樂、購物…）換成錢，吃飯這類必要帳戶可以設每月底薪；花錢時記一筆支出（可以透支），帳戶之間也能轉帳。累計的點數越多等級越高。</li>
+                <li><strong>獎勵：</strong>按右上角 🎁 或計時器下方的 ⭐。完成蕃茄後依任務類別與專注分鐘數賺點數（可以自己調整每個類別每 15 分鐘幾點），用點數在商店兌換你自己設定的獎勵，例如「玩 30 分鐘手遊」；也可以把星星存進自己設定的帳戶（娛樂、購物…）換成錢，吃飯這類必要帳戶可以設每月底薪；花錢時記一筆支出（可以透支），帳戶之間也能轉帳。累計的點數越多等級越高。</li>
                 <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。也可以把資料存到 Google 雲端硬碟，讓有連接雲端硬碟的 AI 直接讀取。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
                 <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改，按右邊的 ✕ 可以刪掉那一筆。</li>

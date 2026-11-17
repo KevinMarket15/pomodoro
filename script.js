@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.17.1';
+const APP_VERSION = '2026.11.17.2';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -13,7 +13,7 @@ const STORAGE_KEY_PREFS = 'pomodoro_prefs_v1';
 const IS_TOUCH = !!(window.matchMedia && matchMedia('(pointer: coarse)').matches);
 const prefs = loadPrefs();
 function loadPrefs() {
-    const defaults = { theme: 'auto', volume: 1, statusNotify: IS_TOUCH, aiAsks: ['plan', 'review'] };
+    const defaults = { theme: 'auto', volume: 1, statusNotify: IS_TOUCH, bgAudio: IS_TOUCH, aiAsks: ['plan', 'review'] };
     try {
         const p = JSON.parse(localStorage.getItem(STORAGE_KEY_PREFS) || '{}');
         return { ...defaults, ...(p && typeof p === 'object' ? p : {}) };
@@ -105,6 +105,7 @@ const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
 const STORAGE_KEY_REWARDS = 'pomodoro_rewards_v1';
 const REWARD_LIVE_DAYS = 7;  // 最近幾天的點數直接從記錄算（記錄改了會跟著變），更早的結算後存成每日總數
 const REWARD_MAX_WEIGHT = 50;
+const REWARD_UNIT_SEC = 15 * 60; // 點數依專注時間計算：類別設定的是「每 15 分鐘幾點」
 const REWARD_DEFAULT_OTHER = 5; // 不在任務庫或沒選任務的蕃茄，每顆幾點
 const REWARD_TITLES = ['蕃茄種子', '冒出新芽', '小小幼苗', '長出綠葉', '開出黃花', '結出青果', '慢慢轉紅', '熟透的蕃茄', '蕃茄農夫', '蕃茄大師'];
 const REWARD_DEFAULT_SHOP = [
@@ -259,6 +260,8 @@ let forcedRev = 0;        // 見 saveTimerState：自動結束時，狀態的版
 const NOTIFY_TAG = 'pomodoro-phase';   // 「時間到」的通知
 const STATUS_TAG = 'pomodoro-status';  // 計時中的常駐通知
 
+let keepAliveAudio = null;    // 手機背景保持計時用的靜音音訊，見 updateKeepAlive
+let keepAliveStopTimer = null;
 const timeDisplay = document.getElementById('time');
 const startBtn = document.getElementById('startBtn');
 
@@ -391,7 +394,54 @@ function announce(msg, started) {
     if (document.hidden || !document.hasFocus()) { startAttention(); notify(msg); }
 }
 
+/* 背景保持計時（手機）：手機關掉螢幕或切到別的 App 時會暫停網頁，時間到也響不了、發不了通知。
+ * 計時中在背景循環播放一段聽不到的聲音，讓系統把網頁當成正在播放音樂而繼續執行。
+ * 鎖定畫面可能出現播放器控制列，上面顯示這一段幾點結束，按暫停就是暫停計時。
+ * 瀏覽器只允許在使用者點擊之後開始播放，所以重新整理後要等第一次點擊才會恢復。 */
+function silentAudioUrl() {
+    const rate = 8000, n = rate; // 1 秒、8kHz、16 位元單聲道
+    const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+    const str = (o, t) => [...t].forEach((c, i) => v.setUint8(o + i, c.charCodeAt(0)));
+    str(0, 'RIFF'); v.setUint32(4, 36 + n * 2, true); str(8, 'WAVEfmt ');
+    v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+    v.setUint32(24, rate, true); v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+    str(36, 'data'); v.setUint32(40, n * 2, true);
+    // 振幅只有 ±2（最大 32767），人耳聽不到，但不是完全無聲，系統才會當成「正在播放」
+    for (let i = 0; i < n; i++) v.setInt16(44 + i * 2, i % 2 ? 2 : -2, true);
+    return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+function updateKeepAlive() {
+    const want = isRunning && !!prefs.bgAudio;
+    clearTimeout(keepAliveStopTimer);
+    if (want) {
+        if (!keepAliveAudio) {
+            keepAliveAudio = new Audio(silentAudioUrl());
+            keepAliveAudio.loop = true;
+            keepAliveAudio.volume = 1;
+        }
+        if (keepAliveAudio.paused) keepAliveAudio.play().catch(() => {}); // 還沒有點擊過頁面時會被拒絕，等下次點擊
+        if ('mediaSession' in navigator && !videoPip) {
+            try {
+                const end = isCountUp() ? '正數計時中' : `${clockText(endTime)} 結束`;
+                navigator.mediaSession.metadata = new MediaMetadata({ title: `${modeLabel()} · ${end}`, artist: '蕃茄鐘', artwork: [{ src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png' }] });
+                navigator.mediaSession.playbackState = 'playing';
+            } catch (err) {}
+            setMediaSessionHandlers({ play: () => { if (!isRunning) toggleTimer(); }, pause: () => { if (isRunning) toggleTimer(); } });
+        }
+    } else if (keepAliveAudio && !keepAliveAudio.paused) {
+        // 多播幾秒再停：時間到的提示音與通知需要網頁還醒著
+        keepAliveStopTimer = setTimeout(() => {
+            if (isRunning) return;
+            keepAliveAudio.pause();
+            if ('mediaSession' in navigator && !videoPip) { try { navigator.mediaSession.playbackState = 'paused'; } catch (err) {} }
+        }, 6000);
+    }
+}
+// 重新整理後還在計時：第一次點擊頁面時恢復背景音訊
+document.addEventListener('pointerdown', () => { if (isRunning && prefs.bgAudio && (!keepAliveAudio || keepAliveAudio.paused)) updateKeepAlive(); });
+
 async function updateWakeLock() {
+    updateKeepAlive();
     if (!('wakeLock' in navigator)) return;
     if (isRunning && !document.hidden) {
         if (wakeLock) return;
@@ -2000,6 +2050,7 @@ function renderSettings() {
     document.getElementById('setLongValue').textContent = longEvery();
     document.getElementById('setAutoStart').checked = !!timerSettings.autoStart;
     document.getElementById('setStatusNotify').checked = !!prefs.statusNotify;
+    document.getElementById('setBgAudio').checked = !!prefs.bgAudio;
 }
 // 主題換了之後，懸浮小視窗也要跟著換
 function refreshThemeDependents() {
@@ -2026,6 +2077,10 @@ document.getElementById('setLongMinus').addEventListener('click', () => changeLo
 document.getElementById('setLongPlus').addEventListener('click', () => changeLongEvery(1));
 document.getElementById('setAutoStart').addEventListener('change', (e) => {
     timerSettings.autoStart = e.target.checked; saveTimerSettings();
+});
+document.getElementById('setBgAudio').addEventListener('change', (e) => {
+    prefs.bgAudio = e.target.checked; savePrefs();
+    updateKeepAlive();
 });
 document.getElementById('setStatusNotify').addEventListener('change', (e) => {
     prefs.statusNotify = e.target.checked; savePrefs();
@@ -2433,6 +2488,12 @@ function cleanRewards(raw) {
         });
     }
     const rateOf = v => { const n = Math.round(Number(v) * 100) / 100; return n > 0 && n <= 10000 ? n : 1; };
+    if (r.rate && typeof r.rate === 'object') {
+        out.rate = {
+            mode: ['goal', 'history', 'manual'].includes(r.rate.mode) ? r.rate.mode : 'goal',
+            goalMin: cleanInt(r.rate.goalMin, 15, 1440, 120), goalDays: cleanInt(r.rate.goalDays, 1, 31, 25)
+        };
+    }
     let accounts = Array.isArray(r.accounts) ? r.accounts : null;
     if (!accounts && r.fund && typeof r.fund === 'object') accounts = [{ id: 'fun', name: '娛樂', budget: r.fund.budget, rate: r.fund.rate, base: 0 }];
     if (accounts) {
@@ -2490,6 +2551,11 @@ function rewardWeigher(r) {
     return task => (Object.prototype.hasOwnProperty.call(byTask, task) ? byTask[task] : otherWeight(r));
 }
 
+// 一筆記錄賺幾點：有算成蕃茄的專注（規則同今日蕃茄數），依實際分鐘數 × 類別的「每 15 分鐘幾點」
+function rewardStarsOf(l, weigh) {
+    return pomodorosOf(l) > 0 ? Math.round(l.actualSec / REWARD_UNIT_SEC * weigh(l.task)) : 0;
+}
+
 // 尚未結算的日子：每天賺到與花掉的點數
 function liveRewardDays(r) {
     const weigh = rewardWeigher(r);
@@ -2498,7 +2564,7 @@ function liveRewardDays(r) {
     loadLogs().forEach(l => {
         const d = dateKey(l.end);
         if (r.days[d]) return;
-        const p = pomodorosOf(l) * weigh(l.task);
+        const p = rewardStarsOf(l, weigh);
         if (p) day(d).e += p;
     });
     r.redeems.forEach(x => { const d = dateKey(x.at); if (!r.days[d]) day(d).s += x.cost; });
@@ -2711,6 +2777,23 @@ function thisMonth() { return todayKey().slice(0, 7); }
 // 大家用同一個匯率，照最近的努力程度剛好能把每個帳戶存滿
 function suggestedRate(totalBudget, last30) { return Math.max(0.01, Math.round(totalBudget / Math.max(last30, 300) * 100) / 100); }
 
+/* 匯率的三種算法（rate.mode）：
+ *   goal     依每天目標（預設）：每月目標星星＝每天目標分鐘 ÷ 15 × 10 星 × 每月目標天數，
+ *            匯率＝所有帳戶的每月存入上限加總 ÷ 每月目標星星。做到目標剛好存滿；匯率固定，不會因為偷懶變高
+ *   history  依過去表現：按「重算」時用最近 30 天賺到的星星算，記錄滿 14 天才能算，而且只會調低不會調高
+ *   manual   每個帳戶自己填 */
+function rateSettings(r) { return { mode: 'goal', goalMin: 120, goalDays: 25, ...(r.rate || {}) }; }
+function goalMonthStars(rs) { return Math.round(rs.goalMin / 15 * 10 * rs.goalDays); }
+function starBudgetTotal(accounts) { return accounts.reduce((sum, a) => sum + (a.budget || 0), 0); }
+function goalRate(total, rs) { const t = goalMonthStars(rs); return t && total ? Math.max(0.01, Math.round(total / t * 100) / 100) : 1; }
+function accRate(r, a) { const rs = rateSettings(r); return rs.mode === 'goal' ? goalRate(starBudgetTotal(rewardAccounts(r)), rs) : a.rate; }
+// 有記錄的天數（從第一筆專注記錄到今天），依過去表現至少要 14 天
+function historyDays() {
+    const logs = loadLogs().filter(l => l.mode === 'focus');
+    if (!logs.length) return 0;
+    return Math.round((new Date(`${todayKey()}T00:00`) - new Date(`${dateKey(logs[0].start)}T00:00`)) / 86400000) + 1;
+}
+
 // 各帳戶的餘額與本月數字：balance、monthIn（本月用星星存入的錢，計入上限）、monthBase（本月底薪）、monthOut（本月支出）
 function accountStats(r) {
     const month = thisMonth(), inMonth = at => dateKey(at).startsWith(month);
@@ -2729,10 +2812,10 @@ function accountStats(r) {
     return st;
 }
 // 這次最多能存入幾顆星：不超過星星餘額，也不超過這個帳戶本月剩下的額度
-function maxDepositStars(acc, st, starBalance) {
+function maxDepositStars(acc, rate, st, starBalance) {
     if (!acc || !acc.budget) return 0;
     const room = Math.max(0, acc.budget - st.monthIn);
-    return Math.max(0, Math.min(starBalance, Math.floor(room / acc.rate + 1e-9)));
+    return Math.max(0, Math.min(starBalance, Math.floor(room / rate + 1e-9)));
 }
 // 最多能轉出多少：本月底薪還沒花掉的部分要留著
 function transferable(st) { return Math.max(0, st.balance - Math.max(0, st.monthBase - st.monthOut)); }
@@ -2767,9 +2850,9 @@ function updateFundPreview() {
     const acc = accById(r, document.getElementById('fdDepAcc').value);
     const n = cleanInt(document.getElementById('fdStars').value, 1, 1e7, null);
     const input = document.getElementById('fdStars');
-    document.getElementById('fdPreview').textContent = acc && n ? `＝${money(Math.floor(n * acc.rate))}` : '';
+    document.getElementById('fdPreview').textContent = acc && n ? `＝${money(Math.floor(n * accRate(r, acc)))}` : '';
     if (acc) {
-        const st = accountStats(r)[acc.id], max = maxDepositStars(acc, st, rewardSummary(r).balance);
+        const st = accountStats(r)[acc.id], max = maxDepositStars(acc, accRate(r, acc), st, rewardSummary(r).balance);
         input.placeholder = max ? `幾顆星（最多 ${max}）` : (st.monthIn >= acc.budget ? '本月額度已滿' : '星星不夠');
     }
 }
@@ -2787,7 +2870,7 @@ function renderFund(r, s) {
         const info = rewardRow('ac-info');
         info.appendChild(rewardEl('div', 'ac-name', a.name));
         const parts = [];
-        if (a.budget) parts.push(`本月存入 ${money(x.monthIn)}／${money(a.budget)} · 1 ⭐ = NT$${a.rate}`);
+        if (a.budget) parts.push(`本月存入 ${money(x.monthIn)}／${money(a.budget)} · 1 ⭐ = NT$${accRate(r, a)}`);
         if (a.base) parts.push(`底薪 ${money(a.base)}／月`);
         if (x.monthOut) parts.push(`本月支出 ${money(x.monthOut)}`);
         info.appendChild(rewardEl('div', 'ac-note', parts.join(' · ') || '只能用轉帳或底薪存錢'));
@@ -2819,7 +2902,7 @@ function setFundBudget() {
     const budget = cleanInt(input.value, 1, 1e6, null);
     if (budget === null) { input.focus(); return; }
     const r = loadRewards();
-    const rate = suggestedRate(budget, rewardSummary(r).last30);
+    const rate = goalRate(budget, rateSettings(r));
     r.accounts = [...rewardAccounts(r), { id: 'fun', name: '娛樂', budget, rate, base: 0 }];
     saveRewards(r);
     playTone('click');
@@ -2835,12 +2918,13 @@ function depositFund() {
     if (!acc) return;
     const s = rewardSummary(r), st = accountStats(r)[acc.id];
     const input = document.getElementById('fdStars');
-    const max = maxDepositStars(acc, st, s.balance);
+    const rate = accRate(r, acc);
+    const max = maxDepositStars(acc, rate, st, s.balance);
     const n = cleanInt(input.value, 1, 1e7, null);
     if (n === null) { if (max) input.value = max; updateFundPreview(); input.focus(); return; } // 沒填：先幫你填最多能存的
     if (n > s.balance) { fundMsg(`星星不夠，目前只有 ${s.balance} 顆`, true); return; }
     if (n > max) { fundMsg(`「${acc.name}」本月額度只剩 ${money(Math.max(0, acc.budget - st.monthIn))}，最多存 ${max} 顆星`, true); return; }
-    const entry = { id: newItemId(), at: Date.now(), acc: acc.id, stars: n, amount: Math.floor(n * acc.rate) };
+    const entry = { id: newItemId(), at: Date.now(), acc: acc.id, stars: n, amount: Math.floor(n * rate) };
     r.deposits.push(entry);
     saveRewards(r);
     playTone('alarm');
@@ -2912,20 +2996,73 @@ function accountEditCard(a) {
     card.appendChild(head);
     const grid = rewardRow('ac-edit-grid');
     grid.appendChild(field('每月星星存入上限 NT$', 'ac-in-budget', a.budget || '', { type: 'number', min: '0', max: '1000000', placeholder: '0＝不存星星' }));
-    grid.appendChild(field('1 ⭐ = NT$', 'ac-in-rate', a.rate, { type: 'number', min: '0.01', max: '10000', step: '0.1' }));
+    const rateField = field('1 ⭐ = NT$', 'ac-in-rate', a.rate, { type: 'number', min: '0.01', max: '10000', step: '0.01' });
+    rateField.querySelector('input').disabled = rateSettings(loadRewards()).mode !== 'manual'; // 只有手動時能直接改
+    grid.appendChild(rateField);
     grid.appendChild(field('每月底薪 NT$', 'ac-in-base', a.base || '', { type: 'number', min: '0', max: '1000000', placeholder: '0＝沒有' }));
     card.appendChild(grid);
     return card;
 }
 function renderAccountSettings() {
+    const r = loadRewards(), rs = rateSettings(r);
+    document.querySelectorAll('#rateMode .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.mode === rs.mode));
+    document.getElementById('rateGoalBox').style.display = rs.mode === 'goal' ? '' : 'none';
+    document.getElementById('fdRecalc').style.display = rs.mode === 'history' ? '' : 'none';
+    document.getElementById('goalMin').value = rs.goalMin;
+    document.getElementById('goalDays').value = rs.goalDays;
+    updateRateNote();
     const box = document.getElementById('acSettingsList');
     box.innerHTML = '';
-    rewardAccounts(loadRewards()).forEach(a => box.appendChild(accountEditCard(a)));
+    rewardAccounts(r).forEach(a => {
+        const card = accountEditCard(a);
+        if (rs.mode === 'goal') card.querySelector('.ac-in-rate').value = accRate(r, a); // 顯示依目標算出的匯率
+        box.appendChild(card);
+    });
 }
+// 匯率說明：目前的算法算出多少，以及最近表現和目標的比較
+function updateRateNote() {
+    const r = loadRewards(), rs = rateSettings(r), s = rewardSummary(r), days = historyDays();
+    const el = document.getElementById('rateModeNote');
+    if (rs.mode === 'goal') {
+        const goalMin = cleanInt(document.getElementById('goalMin').value, 15, 1440, rs.goalMin);
+        const goalDays = cleanInt(document.getElementById('goalDays').value, 1, 31, rs.goalDays);
+        const target = goalMonthStars({ goalMin, goalDays });
+        const total = starBudgetTotal(rewardAccounts(r));
+        let text = `每月目標 ${target} 星（每天 ${goalMin} 分鐘 × ${goalDays} 天，以每 15 分鐘 10 星的類別計）`;
+        text += total ? `，所有帳戶每月上限合計 ${money(total)}，所以 1 ⭐ = NT$${goalRate(total, { goalMin, goalDays })}。` : '。';
+        if (days >= 14) {
+            const pct = Math.round(s.last30 / target * 100);
+            text += `最近 30 天賺到 ${s.last30} 星，是目標的 ${pct}%。`;
+            if (pct >= 120) text += '已經連續超過目標，可以考慮把每天目標調高。';
+        } else text += `記錄滿 14 天後，這裡會告訴你最近的表現和目標差多少（目前 ${days} 天）。`;
+        el.textContent = text;
+    } else if (rs.mode === 'history') {
+        el.textContent = days >= 14
+            ? `按「依最近 30 天重算匯率」：所有帳戶的每月上限合計 ÷ 最近 30 天賺到的星星（${s.last30} 星）。為了不讓偷懶的月份換到更好的匯率，重算只會調低、不會調高；想調高請改用手動。`
+            : `「依過去表現」需要至少 14 天的記錄才準（目前 ${days} 天），在那之前建議先用「依每天目標」。`;
+    } else {
+        el.textContent = '每個帳戶的匯率自己填，按「儲存」後生效。';
+    }
+}
+function setRateMode(mode) {
+    const r = loadRewards();
+    const rs = rateSettings(r);
+    // 從「依目標」換到其他方式時，先把目前算出的匯率存進各帳戶，避免匯率突然跳回很久以前的數字
+    if (rs.mode === 'goal' && mode !== 'goal') rewardAccounts(r).forEach(a => { a.rate = accRate(r, a); });
+    r.rate = { ...rs, mode };
+    saveRewards(r);
+    playTone('click');
+    fundMsg('');
+    renderAccountSettings();
+    updateRewardBadge();
+}
+document.getElementById('rateMode').addEventListener('click', (e) => { const b = e.target.closest('.seg-btn'); if (b) setRateMode(b.dataset.mode); });
+['goalMin', 'goalDays'].forEach(id => document.getElementById(id).addEventListener('input', updateRateNote));
 function addAccountCard() {
     playTone('click');
     const s = rewardSummary();
-    const card = accountEditCard({ id: newItemId(), name: '', budget: 0, rate: suggestedRate(1000, s.last30), base: 0 });
+    const r = loadRewards();
+    const card = accountEditCard({ id: newItemId(), name: '', budget: 0, rate: rewardAccounts(r).length ? accRate(r, rewardAccounts(r)[0]) : 1, base: 0 });
     document.getElementById('acSettingsList').appendChild(card);
     card.querySelector('.ac-in-name').focus();
 }
@@ -2948,6 +3085,13 @@ function saveAccountSettings() {
     const withMoney = removed.filter(a => st[a.id] && st[a.id].balance !== 0);
     if (withMoney.length && !confirm(`刪除「${withMoney.map(a => a.name).join('」「')}」？裡面的餘額也會一起消失。`)) return;
     r.accounts = accounts;
+    const rs = rateSettings(r);
+    if (rs.mode === 'goal') {
+        const goalMin = cleanInt(document.getElementById('goalMin').value, 15, 1440, null);
+        const goalDays = cleanInt(document.getElementById('goalDays').value, 1, 31, null);
+        if (goalMin === null || goalDays === null) { fundMsg('每天目標要在 15–1440 分鐘之間，每月目標天數 1–31 天', true); return; }
+        r.rate = { ...rs, goalMin, goalDays };
+    }
     saveRewards(r);
     grantBaseSalaries(); // 新設了底薪的帳戶，這個月的底薪馬上發
     playTone('click');
@@ -2959,10 +3103,19 @@ function recalcFundRate() {
     const cards = [...document.querySelectorAll('#acSettingsList .ac-edit')];
     const total = cards.reduce((sum, c) => sum + (cleanInt(c.querySelector('.ac-in-budget').value, 0, 1e6, 0) || 0), 0);
     if (!total) { fundMsg('先設定至少一個帳戶的每月星星存入上限', true); return; }
-    const rate = suggestedRate(total, rewardSummary().last30);
-    cards.forEach(c => { if (cleanInt(c.querySelector('.ac-in-budget').value, 1, 1e6, null)) c.querySelector('.ac-in-rate').value = rate; });
+    const days = historyDays();
+    if (days < 14) { fundMsg(`記錄要滿 14 天才能依過去表現計算（目前 ${days} 天）`, true); return; }
+    const last30 = rewardSummary().last30;
+    if (!last30) { fundMsg('最近 30 天沒有賺到星星，沒辦法計算', true); return; }
+    const rate = Math.max(0.01, Math.round(total / last30 * 100) / 100);
+    let lowered = 0;
+    cards.forEach(c => {
+        if (!cleanInt(c.querySelector('.ac-in-budget').value, 1, 1e6, null)) return;
+        const input = c.querySelector('.ac-in-rate'), cur = Number(input.value);
+        if (!(cur > 0) || rate < cur) { input.value = rate; lowered++; } // 只調低
+    });
     playTone('click');
-    fundMsg(`已填入建議匯率 NT$${rate}，按「儲存」後生效`);
+    fundMsg(lowered ? `已填入 NT$${rate}，按「儲存」後生效` : `算出來是 NT$${rate}，沒有比目前的低，所以不變（重算只會調低）`);
 }
 
 document.getElementById('fdSetBudget').addEventListener('click', setFundBudget);
@@ -3159,6 +3312,8 @@ function mergeRewards(baseStr, localStr, remoteStr) {
     const shop = pick(b.shop, l.shop, r.shop) === undefined ? undefined
         : mergeList(withIds(rewardShop(b), x => x.id), withIds(rewardShop(l), x => x.id), withIds(rewardShop(r), x => x.id));
     if (shop !== undefined) out.shop = shop;
+    const rate = pick(b.rate, l.rate, r.rate);
+    if (rate !== undefined) out.rate = rate;
     const accounts = pick(b.accounts, l.accounts, r.accounts) === undefined ? undefined
         : mergeList(withIds(rewardAccounts(b), x => x.id), withIds(rewardAccounts(l), x => x.id), withIds(rewardAccounts(r), x => x.id));
     if (accounts !== undefined) out.accounts = accounts;
