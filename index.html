@@ -265,24 +265,33 @@
                 <div class="rw-level-track"><div class="rw-level-fill" id="rwLevelFill"></div></div>
                 <div class="setting-note top" id="rwLevelNote"></div>
             </div>
-            <div class="stats-heading">娛樂基金（把星星存成可以花的娛樂費）</div>
+            <div class="stats-heading">帳戶（把星星存成可以花的錢）</div>
             <div class="rw-fund">
-                <div class="rw-level-head"><span>帳戶餘額</span><span class="rw-money" id="fdBalance">NT$ 0</span></div>
+                <div id="acList"></div>
                 <div class="setting-note top" id="fdNote"></div>
                 <div class="rw-add" id="fdSetup">
                     <input type="number" class="text-input" id="fdBudgetNew" min="1" max="1000000" placeholder="每月娛樂預算（NT$）" aria-label="每月娛樂預算">
                     <button class="action-btn export" id="fdSetBudget">設定</button>
                 </div>
                 <div id="fdOps">
-                    <div class="rw-add">
-                        <input type="number" class="text-input" id="fdStars" min="1" placeholder="存入幾顆星" aria-label="要存入的星星數">
+                    <div class="rw-add rw-wrap" id="fdDepRow">
+                        <select class="text-input ac-select" id="fdDepAcc" aria-label="存入哪個帳戶"></select>
+                        <input type="number" class="text-input" id="fdStars" min="1" placeholder="幾顆星" aria-label="要存入的星星數">
                         <span class="rw-preview" id="fdPreview"></span>
                         <button class="action-btn export" id="fdDeposit">存入</button>
                     </div>
-                    <div class="rw-add">
-                        <input type="text" class="text-input" id="fdExpName" maxlength="100" placeholder="支出用途，例如：課金" aria-label="支出用途">
+                    <div class="rw-add rw-wrap">
+                        <select class="text-input ac-select" id="fdExpAcc" aria-label="從哪個帳戶支出"></select>
+                        <input type="text" class="text-input" id="fdExpName" maxlength="100" placeholder="用途，例如：午餐" aria-label="支出用途">
                         <input type="number" class="text-input rw-cost-input" id="fdExpAmount" min="1" placeholder="金額" aria-label="支出金額">
                         <button class="action-btn" id="fdExpense">記支出</button>
+                    </div>
+                    <div class="rw-add rw-wrap" id="fdTrRow">
+                        <select class="text-input ac-select" id="fdFrom" aria-label="轉出帳戶"></select>
+                        <span class="rw-preview">→</span>
+                        <select class="text-input ac-select" id="fdTo" aria-label="轉入帳戶"></select>
+                        <input type="number" class="text-input rw-cost-input" id="fdTrAmount" min="1" placeholder="金額" aria-label="轉帳金額">
+                        <button class="action-btn" id="fdTransfer">轉帳</button>
                     </div>
                 </div>
                 <div class="rw-msg" id="fdMsg" role="status"></div>
@@ -300,20 +309,16 @@
                 <div class="setting-note">依任務所在的類別計算，娛樂類可以設成 0 點。修改後，最近 7 天的點數會照新設定重算；更早的已經結算，不會改變。</div>
             </details>
             <details class="rw-details" id="fdSettings">
-                <summary>娛樂基金設定</summary>
-                <div class="setting-row">
-                    <span class="setting-label">每月預算（NT$）<small>也是每個月最多能存入的金額</small></span>
-                    <input type="number" class="text-input rw-num" id="fdBudget" min="1" max="1000000" aria-label="每月預算">
-                </div>
-                <div class="setting-row">
-                    <span class="setting-label">1 顆星＝NT$<small id="fdRateHint"></small></span>
-                    <input type="number" class="text-input rw-num" id="fdRate" min="0.01" max="10000" step="0.1" aria-label="匯率">
+                <summary>帳戶設定</summary>
+                <div id="acSettingsList"></div>
+                <div class="data-actions">
+                    <button class="action-btn" id="acAdd">＋ 新增帳戶</button>
+                    <button class="action-btn" id="fdRecalc">依最近 30 天重算匯率</button>
                 </div>
                 <div class="data-actions">
                     <button class="action-btn export" id="fdSaveSettings">儲存</button>
-                    <button class="action-btn" id="fdRecalc">依最近 30 天重算匯率</button>
                 </div>
-                <div class="setting-note">匯率＝每月預算 ÷ 最近 30 天賺到的星星：照最近的努力程度，剛好能存滿一個月的預算。這只是幫你記帳，不會動到真正的錢。</div>
+                <div class="setting-note">「每月星星存入上限」是每個月最多能用星星換進這個帳戶的錢，填 0 表示不能存星星。「每月底薪」適合吃飯、交通這類必要開銷：每個月第一次打開時自動放進帳戶，不靠星星；當月還沒用完的底薪不能轉到別的帳戶。建議匯率＝所有帳戶的存入上限加總 ÷ 最近 30 天賺到的星星，照最近的努力程度剛好能把每個帳戶存滿。這只是幫你記帳，不會動到真正的錢。</div>
             </details>
             <details class="rw-details">
                 <summary>最近 7 天的點數紀錄</summary>
@@ -347,7 +352,7 @@
                 <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
                 <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完（照行程順序計算，含休息時間）。點卡片可以看那一張預計幾點做完。</li>
                 <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
-                <li><strong>獎勵：</strong>按右上角 🎁 或計時器下方的 ⭐。每完成一顆蕃茄依任務類別賺點數（可以自己調整每個類別幾點），用點數在商店兌換你自己設定的獎勵，例如「玩 30 分鐘手遊」；也可以把星星存進「娛樂基金」換成娛樂費，花錢時記一筆支出（可以透支）。累計的點數越多等級越高。</li>
+                <li><strong>獎勵：</strong>按右上角 🎁 或計時器下方的 ⭐。每完成一顆蕃茄依任務類別賺點數（可以自己調整每個類別幾點），用點數在商店兌換你自己設定的獎勵，例如「玩 30 分鐘手遊」；也可以把星星存進自己設定的帳戶（娛樂、購物…）換成錢，吃飯這類必要帳戶可以設每月底薪；花錢時記一筆支出（可以透支），帳戶之間也能轉帳。累計的點數越多等級越高。</li>
                 <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。也可以把資料存到 Google 雲端硬碟，讓有連接雲端硬碟的 AI 直接讀取。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
                 <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改，按右邊的 ✕ 可以刪掉那一筆。</li>

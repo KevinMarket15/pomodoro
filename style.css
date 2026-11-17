@@ -534,7 +534,24 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 .rw-day { font-size: 0.8rem; color: var(--faint); margin: 12px 0 2px; }
 .rw-redeem { font-size: 0.85rem; padding: 4px 0; }
 .rw-money { font-size: 1.3rem; color: var(--success-color); font-variant-numeric: tabular-nums; }
-.rw-money.bad, .rw-msg.bad { color: var(--accent-color); }
+.rw-money.bad, .rw-msg.bad { color: #e5534b; } /* 固定用紅色：休息時 --accent-color 會變綠色 */
 .rw-preview { font-size: 0.85rem; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
 .rw-msg { font-size: 0.8rem; color: var(--success-color); min-height: 1em; margin-top: 6px; }
 .rw-num { flex: 0 0 110px; }
+.rw-wrap { flex-wrap: wrap; }
+.rw-wrap .text-input { flex: 1 1 60px; }
+.rw-wrap .rw-cost-input { flex: 0 1 70px; }
+.rw-wrap .action-btn { padding: 8px 12px; }
+.ac-select { flex: 0 1 96px !important; appearance: auto; cursor: pointer; padding-right: 6px; }
+.ac-row { align-items: center; }
+.ac-info { flex: 1; min-width: 0; }
+.ac-name { font-weight: bold; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-note { font-size: 0.75rem; color: var(--faint); }
+.ac-row .rw-money { font-size: 1.05rem; flex-shrink: 0; }
+.ac-edit { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.ac-edit-head { display: flex; align-items: flex-end; gap: 8px; }
+.ac-edit-head .ac-field { flex: 1; }
+.ac-edit-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
+.ac-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; color: var(--faint); min-width: 0; }
+.ac-field .text-input { max-width: none; width: 100%; box-sizing: border-box; }
+@media (max-width: 420px) { .ac-edit-grid { grid-template-columns: 1fr 1fr; } }
