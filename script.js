@@ -2388,7 +2388,10 @@ function adoptRemoteTimerState() {
  *   weights  { 類別名稱: 每顆幾點 }，沒設定的類別用 defaultWeight 猜；other：不在任務庫或沒選任務的
  *   shop     [{id, name, cost}]  商店項目（還沒存過時用 REWARD_DEFAULT_SHOP）
  *   redeems  [{id, at, name, cost}]  還沒結算的兌換
- *   days     { 'YYYY-MM-DD': {e: 賺到, s: 花掉} }  已結算的日子
+ *   fund     {budget, rate}  娛樂基金：每月預算（NT$，也是每月可存入的上限）、匯率（1 星換多少錢）
+ *   deposits [{id, at, stars, amount}]  還沒結算的「星星存入基金」
+ *   expenses [{id, at, name, amount}]   還沒結算的基金支出（可以透支）
+ *   days     { 'YYYY-MM-DD': {e: 賺到, s: 花掉的星星（含存入）, d: 存入的錢, x: 支出的錢} }  已結算的日子
  * 點數不另外存「餘額」：某一天在 days 裡就用結算的數字，否則從時間記錄與 redeems 現算。
  * 最近 REWARD_LIVE_DAYS 天不結算，所以修改、刪除最近的記錄會反映在點數上；記錄保留一年後刪掉也不影響已結算的點數。 */
 function cleanInt(v, min, max, d) { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= min && n <= max ? n : d; }
@@ -2414,9 +2417,17 @@ function cleanRewards(raw) {
     if (r.days && typeof r.days === 'object') {
         Object.keys(r.days).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k)).slice(-5000).forEach(k => {
             const d = r.days[k] || {};
-            out.days[k] = { e: cleanInt(d.e, 0, 1e7, 0), s: cleanInt(d.s, 0, 1e7, 0) };
+            out.days[k] = { e: cleanInt(d.e, 0, 1e7, 0), s: cleanInt(d.s, 0, 1e7, 0), d: cleanInt(d.d, 0, 1e9, 0), x: cleanInt(d.x, 0, 1e9, 0) };
         });
     }
+    if (r.fund && typeof r.fund === 'object') {
+        const budget = cleanInt(r.fund.budget, 1, 1e6, null);
+        const rate = Number(r.fund.rate);
+        if (budget !== null && rate > 0 && rate <= 10000) out.fund = { budget, rate: Math.round(rate * 100) / 100 };
+    }
+    const list = (v, keep) => (Array.isArray(v) ? v.slice(-2000).filter(x => x && typeof x === 'object' && Number.isFinite(x.at)).map(keep) : []);
+    out.deposits = list(r.deposits, x => ({ id: cleanText(x.id, 40) || newItemId(), at: x.at, stars: cleanInt(x.stars, 1, 1e7, 1), amount: cleanInt(x.amount, 0, 1e9, 0) }));
+    out.expenses = list(r.expenses, x => ({ id: cleanText(x.id, 40) || newItemId(), at: x.at, name: cleanText(x.name, 100), amount: cleanInt(x.amount, 1, 1e9, 1) }));
     return out;
 }
 function loadRewards() { return cleanRewards(readStoredJSON(STORAGE_KEY_REWARDS)); }
@@ -2444,7 +2455,7 @@ function rewardWeigher(r) {
 function liveRewardDays(r) {
     const weigh = rewardWeigher(r);
     const days = {};
-    const day = d => days[d] || (days[d] = { e: 0, s: 0 });
+    const day = d => days[d] || (days[d] = { e: 0, s: 0, d: 0, x: 0 });
     loadLogs().forEach(l => {
         const d = dateKey(l.end);
         if (r.days[d]) return;
@@ -2452,6 +2463,8 @@ function liveRewardDays(r) {
         if (p) day(d).e += p;
     });
     r.redeems.forEach(x => { const d = dateKey(x.at); if (!r.days[d]) day(d).s += x.cost; });
+    r.deposits.forEach(x => { const d = dateKey(x.at); if (!r.days[d]) { day(d).s += x.stars; day(d).d += x.amount; } });
+    r.expenses.forEach(x => { const d = dateKey(x.at); if (!r.days[d]) day(d).x += x.amount; });
     return days;
 }
 
@@ -2466,10 +2479,15 @@ function levelTitle(n) { return REWARD_TITLES[n - 1] || '蕃茄傳說'; }
 
 function rewardSummary(r = loadRewards()) {
     const live = liveRewardDays(r);
-    let earned = 0, spent = 0;
-    [...Object.values(r.days), ...Object.values(live)].forEach(d => { earned += d.e; spent += d.s; });
-    const today = live[todayKey()] || r.days[todayKey()] || { e: 0, s: 0 };
-    return { earned, spent, balance: earned - spent, today, live, level: levelOf(earned) };
+    let earned = 0, spent = 0, money = 0, monthIn = 0, monthOut = 0, last30 = 0;
+    const month = todayKey().slice(0, 7), from30 = addDays(todayKey(), -29);
+    [...Object.entries(r.days), ...Object.entries(live)].forEach(([date, d]) => {
+        earned += d.e; spent += d.s; money += d.d - d.x;
+        if (date.startsWith(month)) { monthIn += d.d; monthOut += d.x; }
+        if (date >= from30) last30 += d.e;
+    });
+    const today = live[todayKey()] || r.days[todayKey()] || { e: 0, s: 0, d: 0, x: 0 };
+    return { earned, spent, balance: earned - spent, today, live, level: levelOf(earned), money, monthIn, monthOut, last30 };
 }
 
 // 結算：把 REWARD_LIVE_DAYS 天以前的日子存成每日總數，並刪掉那些日子的兌換明細
@@ -2478,10 +2496,13 @@ function settleRewards() {
     const cutoff = addDays(todayKey(), -(REWARD_LIVE_DAYS - 1));
     const live = liveRewardDays(r);
     const old = Object.keys(live).filter(d => d < cutoff);
-    const staleRedeems = r.redeems.some(x => dateKey(x.at) < cutoff);
-    if (!old.length && !staleRedeems) return;
+    const recent = x => dateKey(x.at) >= cutoff;
+    const stale = !r.redeems.every(recent) || !r.deposits.every(recent) || !r.expenses.every(recent);
+    if (!old.length && !stale) return;
     old.forEach(d => { r.days[d] = live[d]; });
-    r.redeems = r.redeems.filter(x => dateKey(x.at) >= cutoff);
+    r.redeems = r.redeems.filter(recent);
+    r.deposits = r.deposits.filter(recent);
+    r.expenses = r.expenses.filter(recent);
     saveRewards(r);
 }
 
@@ -2567,21 +2588,29 @@ function renderRewards() {
     });
     weightRow('其他（不在任務庫、沒選任務）', null, otherWeight(r), changeWeight((x, v) => { x.other = v; }));
 
-    // 最近的紀錄：每天賺到多少，以及還沒結算的兌換（可以取消）
+    renderFund(r, s);
+
+    // 最近的紀錄：每天賺到多少，以及還沒結算的兌換、存入、支出（可以取消）
     const hist = document.getElementById('rwHistory');
     hist.innerHTML = '';
     const dates = Object.keys(s.live).sort().reverse();
     if (!dates.length) hist.appendChild(rewardEl('div', 'stats-empty', '最近 7 天沒有點數紀錄'));
     dates.forEach(d => {
         const day = s.live[d];
-        hist.appendChild(rewardEl('div', 'rw-day', `${shortDate(d)}（${weekdayText(d)}）賺到 ${day.e} 點` + (day.s ? `，兌換 ${day.s} 點` : '')));
-        r.redeems.filter(x => dateKey(x.at) === d).sort((a, b) => b.at - a.at).forEach(x => {
+        hist.appendChild(rewardEl('div', 'rw-day', `${shortDate(d)}（${weekdayText(d)}）賺到 ${day.e} 點` + (day.s ? `，花掉 ${day.s} 點` : '')));
+        if (day.d || day.x) hist.lastChild.textContent += `；基金存入 NT$${day.d}` + (day.x ? `、支出 NT$${day.x}` : '');
+        const entries = [
+            ...r.redeems.map(x => ({ at: x.at, text: x.name, val: `−${x.cost} ⭐`, title: '取消這次兌換（退回點數）', undo: () => cancelRewardEntry('redeems', x.id) })),
+            ...r.deposits.map(x => ({ at: x.at, text: '存入娛樂基金', val: `−${x.stars} ⭐ → NT$${x.amount}`, title: '取消這次存入（退回星星）', undo: () => cancelRewardEntry('deposits', x.id) })),
+            ...r.expenses.map(x => ({ at: x.at, text: x.name || '支出', val: `−NT$${x.amount}`, title: '刪除這筆支出', undo: () => cancelRewardEntry('expenses', x.id) }))
+        ];
+        entries.filter(x => dateKey(x.at) === d).sort((a, b) => b.at - a.at).forEach(x => {
             const row = rewardRow('rw-item rw-redeem');
-            row.appendChild(rewardEl('span', 'rw-item-name', `${clockText(x.at)} ${x.name}`));
-            row.appendChild(rewardEl('span', 'rw-item-cost', `−${x.cost}`));
+            row.appendChild(rewardEl('span', 'rw-item-name', `${clockText(x.at)} ${x.text}`));
+            row.appendChild(rewardEl('span', 'rw-item-cost', x.val));
             const cancel = rewardEl('button', 'rw-del', '✕');
-            cancel.title = '取消這次兌換（退回點數）';
-            cancel.addEventListener('click', () => cancelRedeem(x.id));
+            cancel.title = x.title;
+            cancel.addEventListener('click', x.undo);
             row.appendChild(cancel);
             hist.appendChild(row);
         });
@@ -2598,13 +2627,123 @@ function redeemReward(item) {
     updateRewardBadge();
     showToast(`已兌換「${item.name}」，−${item.cost} ⭐ 好好享受！`, '復原', () => cancelRedeem(entry.id, true), 8000);
 }
-function cancelRedeem(id, quiet) {
+function cancelRedeem(id, quiet) { cancelRewardEntry('redeems', id, quiet); }
+// 取消一筆兌換／存入／支出（list：redeems、deposits、expenses）
+function cancelRewardEntry(list, id, quiet) {
     const r = loadRewards();
-    r.redeems = r.redeems.filter(x => x.id !== id);
+    r[list] = r[list].filter(x => x.id !== id);
     saveRewards(r);
     if (!quiet) playTone('delete');
     updateRewardBadge();
 }
+
+/* 娛樂基金：星星依匯率存成錢（每月存入有上限＝每月預算），支出直接扣錢，可以透支 */
+function money(n) { return `NT$${n < 0 ? '−' : ''}${Math.abs(n).toLocaleString('zh-TW')}`; }
+// 建議匯率：每月預算 ÷ 最近 30 天賺到的星星（記錄太少時當作一個月 300 星）
+function suggestedRate(budget, last30) { return Math.max(0.01, Math.round(budget / Math.max(last30, 300) * 100) / 100); }
+// 這次最多能存入幾顆星：不超過星星餘額，也不超過本月剩下的額度
+function fundMaxStars(r, s) {
+    if (!r.fund) return 0;
+    const room = Math.max(0, r.fund.budget - s.monthIn);
+    return Math.max(0, Math.min(s.balance, Math.floor(room / r.fund.rate + 1e-9)));
+}
+function fundMsg(text, bad) { const el = document.getElementById('fdMsg'); el.textContent = text; el.classList.toggle('bad', !!bad); }
+function updateFundPreview() {
+    const r = loadRewards();
+    const n = cleanInt(document.getElementById('fdStars').value, 1, 1e7, null);
+    document.getElementById('fdPreview').textContent = r.fund && n ? `＝${money(Math.floor(n * r.fund.rate))}` : '';
+}
+function renderFund(r, s) {
+    const has = !!r.fund;
+    document.getElementById('fdSetup').style.display = has ? 'none' : '';
+    document.getElementById('fdOps').style.display = has ? '' : 'none';
+    document.getElementById('fdSettings').style.display = has ? '' : 'none';
+    const bal = document.getElementById('fdBalance');
+    bal.textContent = money(s.money);
+    bal.classList.toggle('bad', s.money < 0);
+    if (!has) {
+        document.getElementById('fdNote').textContent = '先設定每月的娛樂預算，網頁會依你最近的努力程度算出星星的匯率。';
+    } else {
+        const max = fundMaxStars(r, s);
+        document.getElementById('fdNote').textContent =
+            `1 ⭐ = NT$${r.fund.rate} · 本月已存入 ${money(s.monthIn)}／${money(r.fund.budget)}` + (s.monthOut ? `，支出 ${money(s.monthOut)}` : '');
+        document.getElementById('fdStars').placeholder = max ? `存入幾顆星（最多 ${max}）` : (s.monthIn >= r.fund.budget ? '本月額度已滿' : '星星不夠');
+        document.getElementById('fdBudget').value = r.fund.budget;
+        document.getElementById('fdRate').value = r.fund.rate;
+        document.getElementById('fdRateHint').textContent = `依最近 30 天（${s.last30} 星）建議 NT$${suggestedRate(r.fund.budget, s.last30)}`;
+    }
+    updateFundPreview();
+}
+function setFundBudget() {
+    const input = document.getElementById('fdBudgetNew');
+    const budget = cleanInt(input.value, 1, 1e6, null);
+    if (budget === null) { input.focus(); return; }
+    const r = loadRewards();
+    r.fund = { budget, rate: suggestedRate(budget, rewardSummary(r).last30) };
+    saveRewards(r);
+    playTone('click');
+    input.value = '';
+    fundMsg(`已設定，1 ⭐ = NT$${r.fund.rate}`);
+    updateRewardBadge();
+}
+function saveFundSettings() {
+    const r = loadRewards();
+    const budget = cleanInt(document.getElementById('fdBudget').value, 1, 1e6, null);
+    const rate = Math.round(Number(document.getElementById('fdRate').value) * 100) / 100;
+    if (budget === null || !(rate > 0 && rate <= 10000)) { fundMsg('預算或匯率的數字不對', true); return; }
+    r.fund = { budget, rate };
+    saveRewards(r);
+    playTone('click');
+    fundMsg('已儲存基金設定');
+    updateRewardBadge();
+}
+function recalcFundRate() {
+    const budget = cleanInt(document.getElementById('fdBudget').value, 1, 1e6, null);
+    if (budget === null) return;
+    document.getElementById('fdRate').value = suggestedRate(budget, rewardSummary().last30);
+    playTone('click');
+    fundMsg('已填入建議匯率，按「儲存」後生效');
+}
+function depositFund() {
+    const r = loadRewards();
+    if (!r.fund) return;
+    const s = rewardSummary(r);
+    const input = document.getElementById('fdStars');
+    const max = fundMaxStars(r, s);
+    const n = cleanInt(input.value, 1, 1e7, null);
+    if (n === null) { if (max) input.value = max; updateFundPreview(); input.focus(); return; } // 沒填：先幫你填最多能存的
+    if (n > s.balance) { fundMsg(`星星不夠，目前只有 ${s.balance} 顆`, true); return; }
+    if (n > max) { fundMsg(`本月額度只剩 ${money(r.fund.budget - s.monthIn)}，最多存 ${max} 顆星`, true); return; }
+    const entry = { id: newItemId(), at: Date.now(), stars: n, amount: Math.floor(n * r.fund.rate) };
+    r.deposits.push(entry);
+    saveRewards(r);
+    playTone('alarm');
+    input.value = '';
+    fundMsg(`已存入 ${money(entry.amount)}`);
+    updateRewardBadge();
+    showToast(`${n} ⭐ 已存成 ${money(entry.amount)} 娛樂費`, '復原', () => cancelRewardEntry('deposits', entry.id, true), 8000);
+}
+function addFundExpense() {
+    const nameEl = document.getElementById('fdExpName'), amountEl = document.getElementById('fdExpAmount');
+    const amount = cleanInt(amountEl.value, 1, 1e9, null);
+    if (amount === null) { amountEl.focus(); return; }
+    const r = loadRewards();
+    r.expenses.push({ id: newItemId(), at: Date.now(), name: nameEl.value.trim().slice(0, 100) || '支出', amount });
+    saveRewards(r);
+    playTone('click');
+    nameEl.value = ''; amountEl.value = '';
+    const left = rewardSummary(r).money;
+    fundMsg(left < 0 ? `已記錄支出，目前透支 ${money(-left)}，之後存入星星就會補回來` : `已記錄支出，剩下 ${money(left)}`, left < 0);
+    updateRewardBadge();
+}
+document.getElementById('fdSetBudget').addEventListener('click', setFundBudget);
+document.getElementById('fdSaveSettings').addEventListener('click', saveFundSettings);
+document.getElementById('fdRecalc').addEventListener('click', recalcFundRate);
+document.getElementById('fdDeposit').addEventListener('click', depositFund);
+document.getElementById('fdExpense').addEventListener('click', addFundExpense);
+document.getElementById('fdStars').addEventListener('input', updateFundPreview);
+[['fdBudgetNew', setFundBudget], ['fdStars', depositFund], ['fdExpName', addFundExpense], ['fdExpAmount', addFundExpense]].forEach(([id, fn]) =>
+    document.getElementById(id).addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); fn(); } }));
 function removeShopItem(item) {
     const r = loadRewards();
     const before = rewardShop(r).slice();
@@ -2632,14 +2771,14 @@ document.getElementById('rwAdd').addEventListener('click', addShopItem);
     if (e.key === 'Enter') { e.preventDefault(); addShopItem(); }
 }));
 
-function openRewards() { settleRewards(); renderRewards(); toggleModal(true, 'rewardModal'); }
+function openRewards() { settleRewards(); fundMsg(''); renderRewards(); toggleModal(true, 'rewardModal'); }
 
 // 兩台裝置都改過獎勵資料時的合併：商店與兌換逐項合併，點數設定逐類別，已結算的日子取比較大的數字
 function mergeRewards(baseStr, localStr, remoteStr) {
     const parse = s => { try { return cleanRewards(JSON.parse(s || 'null')); } catch (err) { return cleanRewards(null); } };
     const b = parse(baseStr), l = parse(localStr), r = parse(remoteStr);
     const pick = (bv, lv, rv) => (sameJSON(lv, bv) ? rv : lv);
-    const out = { weights: {}, redeems: [], days: {} };
+    const out = { weights: {}, redeems: [], deposits: [], expenses: [], days: {} };
     new Set([...Object.keys(b.weights), ...Object.keys(l.weights), ...Object.keys(r.weights)]).forEach(k => {
         const v = pick(b.weights[k], l.weights[k], r.weights[k]);
         if (v !== undefined) out.weights[k] = v;
@@ -2649,14 +2788,16 @@ function mergeRewards(baseStr, localStr, remoteStr) {
     const shop = pick(b.shop, l.shop, r.shop) === undefined ? undefined
         : mergeList(withIds(rewardShop(b), x => x.id), withIds(rewardShop(l), x => x.id), withIds(rewardShop(r), x => x.id));
     if (shop !== undefined) out.shop = shop;
-    const ids = x => withIds(x.redeems, y => y.id);
-    out.redeems = mergeList(ids(b), ids(l), ids(r)).sort((x, y) => x.at - y.at);
+    const fund = pick(b.fund, l.fund, r.fund);
+    if (fund !== undefined) out.fund = fund;
+    const mergeById = k => mergeList(withIds(b[k], y => y.id), withIds(l[k], y => y.id), withIds(r[k], y => y.id)).sort((x, y) => x.at - y.at);
+    ['redeems', 'deposits', 'expenses'].forEach(k => { out[k] = mergeById(k); });
     [l.days, r.days].forEach(days => Object.entries(days).forEach(([d, v]) => {
         const cur = out.days[d];
-        out.days[d] = cur ? { e: Math.max(cur.e, v.e), s: Math.max(cur.s, v.s) } : v;
+        out.days[d] = cur ? { e: Math.max(cur.e, v.e), s: Math.max(cur.s, v.s), d: Math.max(cur.d, v.d), x: Math.max(cur.x, v.x) } : v;
     }));
-    // 已經結算的日子，不再保留那天的兌換明細
-    out.redeems = out.redeems.filter(x => !out.days[dateKey(x.at)]);
+    // 已經結算的日子，不再保留那天的明細
+    ['redeems', 'deposits', 'expenses'].forEach(k => { out[k] = out[k].filter(x => !out.days[dateKey(x.at)]); });
     return JSON.stringify(out);
 }
 
