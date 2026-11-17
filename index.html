@@ -34,6 +34,7 @@
         <button class="help-fab" data-action="open-help" title="使用說明"><span class="fab-icon">?</span><span class="fab-label">使用說明</span></button>
         <button class="help-fab" data-action="open-settings" title="設定"><span class="fab-icon">⚙</span><span class="fab-label">設定</span></button>
         <button class="help-fab" data-action="open-stats" title="每週統計"><span class="fab-icon">📊</span><span class="fab-label">每週統計</span></button>
+        <button class="help-fab" data-action="open-rewards" title="獎勵"><span class="fab-icon">🎁</span><span class="fab-label">獎勵</span></button>
         <button class="help-fab" data-action="open-ai" title="AI 助理"><span class="fab-icon">🤖</span><span class="fab-label">AI 助理</span></button>
         <button class="help-fab float-fab" data-action="open-float" title="懸浮小視窗"><span class="fab-icon">⧉</span><span class="fab-label">懸浮小視窗</span></button>
         <button class="help-fab sync-fab" id="syncFab" data-action="open-sync" title="雲端同步" style="display:none" data-state="off"><span class="fab-icon">☁</span><span class="fab-label">雲端同步</span><span class="sync-dot"></span></button>
@@ -254,6 +255,37 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="rewardModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title">獎勵</div>
+            <div class="rw-level">
+                <div class="rw-level-head"><span id="rwLevel">Lv.1</span><span class="rw-balance" id="rwBalance">⭐ 0</span></div>
+                <div class="rw-level-track"><div class="rw-level-fill" id="rwLevelFill"></div></div>
+                <div class="setting-note top" id="rwLevelNote"></div>
+            </div>
+            <div class="stats-heading">商店（用點數兌換給自己的獎勵）</div>
+            <div id="rwShop"></div>
+            <div class="rw-add">
+                <input type="text" class="text-input" id="rwNewName" maxlength="100" placeholder="新增獎勵，例如：看一集動畫" aria-label="獎勵名稱">
+                <input type="number" class="text-input rw-cost-input" id="rwNewCost" min="1" max="9999" placeholder="點數" aria-label="需要的點數">
+                <button class="action-btn export" id="rwAdd">新增</button>
+            </div>
+            <details class="rw-details">
+                <summary>每顆蕃茄賺幾點</summary>
+                <div id="rwWeights"></div>
+                <div class="setting-note">依任務所在的類別計算，娛樂類可以設成 0 點。修改後，最近 7 天的點數會照新設定重算；更早的已經結算，不會改變。</div>
+            </details>
+            <details class="rw-details">
+                <summary>最近 7 天的點數紀錄</summary>
+                <div id="rwHistory"></div>
+            </details>
+            <div class="setting-note">點數從時間記錄計算：每完成一顆蕃茄（規則同「今日蕃茄數」）就入帳。等級看累計賺到的點數，兌換不會降級。</div>
+        </div>
+    </div>
+</div>
+
 <div class="modal-overlay" id="helpModal">
     <div class="modal-content">
         <button class="modal-close">×</button>
@@ -277,6 +309,7 @@
                 <li><strong>編輯任務：</strong>按任務庫任務右上角的 ✎，可以改名、設定預估蕃茄數與固定任務（電腦也可按右鍵刪除）。刪錯了可以按畫面上方的「復原」。</li>
                 <li><strong>預估與完成時間：</strong>行程卡片會顯示「已完成／預估」的蕃茄數；行程上方顯示還剩幾顆、大約幾點做完（照行程順序計算，含休息時間）。點卡片可以看那一張預計幾點做完。</li>
                 <li><strong>固定任務與今日開始：</strong>任務可以設成每週固定幾天。每天第一次開啟時會跳出「今日開始」，列出之前沒做完的任務和今天的固定任務，勾選後開始。</li>
+                <li><strong>獎勵：</strong>按右上角 🎁 或計時器下方的 ⭐。每完成一顆蕃茄依任務類別賺點數（可以自己調整每個類別幾點），用點數在商店兌換你自己設定的獎勵，例如「玩 30 分鐘手遊」。累計的點數越多等級越高。</li>
                 <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。也可以把資料存到 Google 雲端硬碟，讓有連接雲端硬碟的 AI 直接讀取。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間與任務排行；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
                 <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改，按右邊的 ✕ 可以刪掉那一筆。</li>
@@ -351,6 +384,7 @@
         <div class="cycle-info">
             <span class="cycle-dots" id="cycleDots"></span>
             <span id="pomoCount">今日 0 🍅</span>
+            <button class="points-btn" id="pointsBtn" data-action="open-rewards">⭐ 0</button>
         </div>
 
         <div class="controls">

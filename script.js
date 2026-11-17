@@ -98,6 +98,18 @@ const STORAGE_KEY_STATE = 'pomodoro_state_v5'; // 計時狀態，重新整理後
 const STORAGE_KEY_LOG = 'pomodoro_log_v1';     // 時間記錄
 const LOG_KEEP_DAYS = 365;
 const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
+// 獎勵（點數、商店、等級）。這幾個常數放在這裡，因為載入時 restoreTimerState() 就會用到（更新點數顯示）
+const STORAGE_KEY_REWARDS = 'pomodoro_rewards_v1';
+const REWARD_LIVE_DAYS = 7;  // 最近幾天的點數直接從記錄算（記錄改了會跟著變），更早的結算後存成每日總數
+const REWARD_MAX_WEIGHT = 50;
+const REWARD_DEFAULT_OTHER = 5; // 不在任務庫或沒選任務的蕃茄，每顆幾點
+const REWARD_TITLES = ['蕃茄種子', '冒出新芽', '小小幼苗', '長出綠葉', '開出黃花', '結出青果', '慢慢轉紅', '熟透的蕃茄', '蕃茄農夫', '蕃茄大師'];
+const REWARD_DEFAULT_SHOP = [
+    { id: 'd1', name: '玩 30 分鐘手遊', cost: 20 },
+    { id: 'd2', name: '看一集影片', cost: 15 },
+    { id: 'd3', name: '耍廢 1 小時', cost: 40 },
+    { id: 'd4', name: '玩 1 小時單機遊戲', cost: 40 }
+];
 
 /* 資料檢查：匯入的檔案與雲端來的資料都先過這裡，格式不對的部分直接丟掉 */
 function cleanText(v, max = 200) { return typeof v === 'string' ? v.slice(0, max) : ''; }
@@ -409,6 +421,7 @@ function updateModeUI() {
         (_, i) => `<span class="dot${i < filled ? ' filled' : ''}"></span>`).join('');
     document.getElementById('pomoCount').innerText = `今日 ${count} 🍅`;
     updateCurrentTask();
+    updateRewardBadge();
 }
 
 // 目前任務 = 凹槽第一張卡片
@@ -644,6 +657,7 @@ function finishCountUp() {
         session.pomodoros = Math.floor(session.activeMs / 1000 / Math.max(timerSettings.focus, MIN_POMODORO_SEC));
     }
     const wasFocus = mode === 'focus';
+    const rewardStart = wasFocus ? rewardSummary() : null;
     endSession(true); // 寫入記錄後，今日蕃茄數就會包含這次的
     const after = getTodayCount(), earned = after - before;
     creditCard(cardId, earned, sessionStart);
@@ -651,6 +665,8 @@ function finishCountUp() {
     // 這次跨過「幾顆一次長休息」的倍數就進長休息
     if (wasFocus) next = earned && Math.floor(after / longEvery()) > Math.floor(before / longEvery()) ? 'long' : 'short';
     switchMode(next);
+    const gain = rewardStart ? rewardGainText(rewardStart) : '';
+    if (gain) { playTone('alarm'); showToast(`專注結束！${gain}`, null, null, 6000); }
     autoDriveSave(false);
 }
 
@@ -668,8 +684,10 @@ function finishPhase() {
     const finished = mode;
     const auto = !!timerSettings.autoStart;
     forcedRev = endTime || Date.now();
+    let rewardStart = null; // 完成前的點數，用來算這顆賺了多少
     try {
         const before = getTodayCount();
+        if (finished === 'focus') rewardStart = rewardSummary();
         const cardId = session && session.cardId, sessionStart = session && session.start;
         stopTimer(); endSession(true);
         const earned = getTodayCount() - before;
@@ -677,8 +695,9 @@ function finishPhase() {
         advancePhase(true, earned); // 切到下一段；預設停在那裡等使用者按開始
         if (auto) startTimer();
     } finally { forcedRev = 0; }
+    const gain = rewardStart ? rewardGainText(rewardStart) : '';
     announce(finished === 'focus'
-        ? `專注結束！接下來是${MODE_LABELS[mode]}（${formatTime(timerSettings[mode])}）`
+        ? `專注結束！${gain ? gain + ' ' : ''}接下來是${MODE_LABELS[mode]}（${formatTime(timerSettings[mode])}）`
         : (auto ? '休息結束，下一顆蕃茄開始了！' : '休息結束，準備開始下一顆蕃茄！'), auto);
     autoDriveSave(false);
 }
@@ -1071,6 +1090,7 @@ window.resetToDefault = async function() {
     localStorage.removeItem(STORAGE_KEY_SCHED);
     localStorage.removeItem(STORAGE_KEY_STATE);
     localStorage.removeItem(STORAGE_KEY_LOG);
+    localStorage.removeItem(STORAGE_KEY_REWARDS);
     location.reload();
 }
 
@@ -2346,6 +2366,7 @@ function mergeStored(key, baseStr, localStr, remoteStr) {
         const prep = s => withIds(cleanSchedule(parse(s)), t => t.id);
         return JSON.stringify(mergeList(prep(baseStr), prep(localStr), prep(remoteStr)));
     }
+    if (key === STORAGE_KEY_REWARDS) return mergeRewards(baseStr, localStr, remoteStr);
     return localStr;
 }
 
@@ -2362,9 +2383,286 @@ function adoptRemoteTimerState() {
     updateWakeLock();
 }
 
+/* --- 獎勵：專注賺點數、商店兌換、依累計點數升級 ---
+ * 資料（pomodoro_rewards_v1）：
+ *   weights  { 類別名稱: 每顆幾點 }，沒設定的類別用 defaultWeight 猜；other：不在任務庫或沒選任務的
+ *   shop     [{id, name, cost}]  商店項目（還沒存過時用 REWARD_DEFAULT_SHOP）
+ *   redeems  [{id, at, name, cost}]  還沒結算的兌換
+ *   days     { 'YYYY-MM-DD': {e: 賺到, s: 花掉} }  已結算的日子
+ * 點數不另外存「餘額」：某一天在 days 裡就用結算的數字，否則從時間記錄與 redeems 現算。
+ * 最近 REWARD_LIVE_DAYS 天不結算，所以修改、刪除最近的記錄會反映在點數上；記錄保留一年後刪掉也不影響已結算的點數。 */
+function cleanInt(v, min, max, d) { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= min && n <= max ? n : d; }
+function cleanRewards(raw) {
+    const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+    const out = { weights: {}, redeems: [], days: {} };
+    if (r.weights && typeof r.weights === 'object') {
+        Object.keys(r.weights).slice(0, 100).forEach(k => {
+            const w = cleanInt(r.weights[k], 0, REWARD_MAX_WEIGHT, null);
+            if (w !== null && cleanText(k, 100)) out.weights[cleanText(k, 100)] = w;
+        });
+    }
+    const other = cleanInt(r.other, 0, REWARD_MAX_WEIGHT, null);
+    if (other !== null) out.other = other;
+    if (Array.isArray(r.shop)) {
+        out.shop = r.shop.slice(0, 100).filter(s => s && typeof s === 'object' && cleanText(s.name))
+            .map(s => ({ id: cleanText(s.id, 40) || newItemId(), name: cleanText(s.name, 100), cost: cleanInt(s.cost, 1, 9999, 10) }));
+    }
+    if (Array.isArray(r.redeems)) {
+        out.redeems = r.redeems.slice(-2000).filter(x => x && typeof x === 'object' && Number.isFinite(x.at))
+            .map(x => ({ id: cleanText(x.id, 40) || newItemId(), at: x.at, name: cleanText(x.name, 100), cost: cleanInt(x.cost, 0, 99999, 0) }));
+    }
+    if (r.days && typeof r.days === 'object') {
+        Object.keys(r.days).filter(k => /^\d{4}-\d{2}-\d{2}$/.test(k)).slice(-5000).forEach(k => {
+            const d = r.days[k] || {};
+            out.days[k] = { e: cleanInt(d.e, 0, 1e7, 0), s: cleanInt(d.s, 0, 1e7, 0) };
+        });
+    }
+    return out;
+}
+function loadRewards() { return cleanRewards(readStoredJSON(STORAGE_KEY_REWARDS)); }
+function saveRewards(r) { storeSet(STORAGE_KEY_REWARDS, JSON.stringify(r)); }
+function rewardShop(r) { return r.shop || REWARD_DEFAULT_SHOP; }
+
+// 類別還沒設定點數時的預設：娛樂類 0 點、生活類 5 點、其他 10 點
+function defaultWeight(title) {
+    if (/耍廢|遊戲|手遊|單機|娛樂|休閒|追劇|廢片|放鬆/.test(title)) return 0;
+    if (/健康|生活|家事|吃飯|休息/.test(title)) return 5;
+    return 10;
+}
+function rewardCategories() { return cleanCategories(readStoredJSON(STORAGE_KEY_CATS) || []); }
+function weightOfCategory(r, title) { return Object.prototype.hasOwnProperty.call(r.weights, title) ? r.weights[title] : defaultWeight(title); }
+function otherWeight(r) { return r.other != null ? r.other : REWARD_DEFAULT_OTHER; }
+
+// 回傳「任務名稱 → 每顆幾點」的函式（任務屬於哪個類別，用目前任務庫的名稱對照）
+function rewardWeigher(r) {
+    const byTask = {};
+    rewardCategories().forEach(c => c.tasks.forEach(t => { if (!(t in byTask)) byTask[t] = weightOfCategory(r, c.title); }));
+    return task => (Object.prototype.hasOwnProperty.call(byTask, task) ? byTask[task] : otherWeight(r));
+}
+
+// 尚未結算的日子：每天賺到與花掉的點數
+function liveRewardDays(r) {
+    const weigh = rewardWeigher(r);
+    const days = {};
+    const day = d => days[d] || (days[d] = { e: 0, s: 0 });
+    loadLogs().forEach(l => {
+        const d = dateKey(l.end);
+        if (r.days[d]) return;
+        const p = pomodorosOf(l) * weigh(l.task);
+        if (p) day(d).e += p;
+    });
+    r.redeems.forEach(x => { const d = dateKey(x.at); if (!r.days[d]) day(d).s += x.cost; });
+    return days;
+}
+
+// 等級：Lv.N 需要累計 50 × N × (N − 1) 點（Lv.2 = 100、Lv.3 = 300、Lv.4 = 600…）
+function levelNeed(n) { return 50 * n * (n - 1); }
+function levelOf(earned) {
+    let n = 1;
+    while (earned >= levelNeed(n + 1)) n++;
+    return n;
+}
+function levelTitle(n) { return REWARD_TITLES[n - 1] || '蕃茄傳說'; }
+
+function rewardSummary(r = loadRewards()) {
+    const live = liveRewardDays(r);
+    let earned = 0, spent = 0;
+    [...Object.values(r.days), ...Object.values(live)].forEach(d => { earned += d.e; spent += d.s; });
+    const today = live[todayKey()] || r.days[todayKey()] || { e: 0, s: 0 };
+    return { earned, spent, balance: earned - spent, today, live, level: levelOf(earned) };
+}
+
+// 結算：把 REWARD_LIVE_DAYS 天以前的日子存成每日總數，並刪掉那些日子的兌換明細
+function settleRewards() {
+    const r = loadRewards();
+    const cutoff = addDays(todayKey(), -(REWARD_LIVE_DAYS - 1));
+    const live = liveRewardDays(r);
+    const old = Object.keys(live).filter(d => d < cutoff);
+    const staleRedeems = r.redeems.some(x => dateKey(x.at) < cutoff);
+    if (!old.length && !staleRedeems) return;
+    old.forEach(d => { r.days[d] = live[d]; });
+    r.redeems = r.redeems.filter(x => dateKey(x.at) >= cutoff);
+    saveRewards(r);
+}
+
+// 主畫面的點數按鈕
+function updateRewardBadge() {
+    const btn = document.getElementById('pointsBtn');
+    if (!btn) return;
+    const s = rewardSummary();
+    btn.textContent = `⭐ ${s.balance}`;
+    btn.title = `Lv.${s.level} ${levelTitle(s.level)}，今天賺到 ${s.today.e} 點`;
+    if (document.getElementById('rewardModal').classList.contains('show')) renderRewards();
+}
+
+// 剛完成蕃茄時的提示文字（例如「+20 ⭐」，升級時加上新等級）。before：完成前的 rewardSummary()
+function rewardGainText(before) {
+    const after = rewardSummary();
+    const gained = after.earned - before.earned;
+    if (gained <= 0) return '';
+    let text = `+${gained} ⭐`;
+    if (after.level > before.level) text += `，升到 Lv.${after.level}「${levelTitle(after.level)}」！`;
+    return text;
+}
+
+function rewardRow(className) { const row = document.createElement('div'); row.className = className; return row; }
+function rewardEl(tag, className, text) {
+    const el = document.createElement(tag);
+    if (className) el.className = className;
+    if (text != null) el.textContent = text;
+    return el;
+}
+
+function renderRewards() {
+    const r = loadRewards();
+    const s = rewardSummary(r);
+    const lv = s.level, from = levelNeed(lv), to = levelNeed(lv + 1);
+    document.getElementById('rwLevel').textContent = `Lv.${lv} ${levelTitle(lv)}`;
+    document.getElementById('rwBalance').textContent = `⭐ ${s.balance}`;
+    document.getElementById('rwLevelFill').style.width = `${Math.min(100, (s.earned - from) / (to - from) * 100)}%`;
+    document.getElementById('rwLevelNote').textContent =
+        `累計 ${s.earned} 點，再 ${to - s.earned} 點升到 Lv.${lv + 1} · 今天 +${s.today.e}` + (s.today.s ? `、−${s.today.s}` : '');
+
+    // 商店
+    const shop = document.getElementById('rwShop');
+    shop.innerHTML = '';
+    const items = rewardShop(r);
+    if (!items.length) shop.appendChild(rewardEl('div', 'stats-empty', '商店是空的，在下面新增你想要的獎勵'));
+    items.forEach(item => {
+        const row = rewardRow('rw-item');
+        row.appendChild(rewardEl('span', 'rw-item-name', item.name));
+        row.appendChild(rewardEl('span', 'rw-item-cost', `${item.cost} ⭐`));
+        const buy = rewardEl('button', 'rw-buy', s.balance >= item.cost ? '兌換' : `差 ${item.cost - s.balance}`);
+        buy.disabled = s.balance < item.cost;
+        buy.addEventListener('click', () => redeemReward(item));
+        const del = rewardEl('button', 'rw-del', '✕');
+        del.title = '從商店移除';
+        del.addEventListener('click', () => removeShopItem(item));
+        row.appendChild(buy); row.appendChild(del);
+        shop.appendChild(row);
+    });
+
+    // 每顆蕃茄的點數
+    const box = document.getElementById('rwWeights');
+    box.innerHTML = '';
+    const weightRow = (label, color, value, onChange) => {
+        const row = rewardRow('setting-row');
+        const name = rewardEl('span', 'setting-label rw-cat');
+        if (color) { const dot = rewardEl('span', 'rw-dot'); dot.style.background = color; name.appendChild(dot); }
+        name.appendChild(document.createTextNode(label));
+        const stepper = rewardRow('stepper');
+        const minus = rewardEl('button', 'seg-btn', '−'), plus = rewardEl('button', 'seg-btn', '＋');
+        minus.setAttribute('aria-label', '減少'); plus.setAttribute('aria-label', '增加');
+        minus.addEventListener('click', () => onChange(Math.max(0, value - 1)));
+        plus.addEventListener('click', () => onChange(Math.min(REWARD_MAX_WEIGHT, value + 1)));
+        stepper.appendChild(minus); stepper.appendChild(rewardEl('span', null, String(value))); stepper.appendChild(plus);
+        row.appendChild(name); row.appendChild(stepper);
+        box.appendChild(row);
+    };
+    const changeWeight = mutate => v => { playTone('click'); const x = loadRewards(); mutate(x, v); saveRewards(x); updateRewardBadge(); };
+    const seen = new Set();
+    rewardCategories().forEach(c => {
+        if (seen.has(c.title)) return; seen.add(c.title);
+        weightRow(c.title, c.color, weightOfCategory(r, c.title), changeWeight((x, v) => { x.weights[c.title] = v; }));
+    });
+    weightRow('其他（不在任務庫、沒選任務）', null, otherWeight(r), changeWeight((x, v) => { x.other = v; }));
+
+    // 最近的紀錄：每天賺到多少，以及還沒結算的兌換（可以取消）
+    const hist = document.getElementById('rwHistory');
+    hist.innerHTML = '';
+    const dates = Object.keys(s.live).sort().reverse();
+    if (!dates.length) hist.appendChild(rewardEl('div', 'stats-empty', '最近 7 天沒有點數紀錄'));
+    dates.forEach(d => {
+        const day = s.live[d];
+        hist.appendChild(rewardEl('div', 'rw-day', `${shortDate(d)}（${weekdayText(d)}）賺到 ${day.e} 點` + (day.s ? `，兌換 ${day.s} 點` : '')));
+        r.redeems.filter(x => dateKey(x.at) === d).sort((a, b) => b.at - a.at).forEach(x => {
+            const row = rewardRow('rw-item rw-redeem');
+            row.appendChild(rewardEl('span', 'rw-item-name', `${clockText(x.at)} ${x.name}`));
+            row.appendChild(rewardEl('span', 'rw-item-cost', `−${x.cost}`));
+            const cancel = rewardEl('button', 'rw-del', '✕');
+            cancel.title = '取消這次兌換（退回點數）';
+            cancel.addEventListener('click', () => cancelRedeem(x.id));
+            row.appendChild(cancel);
+            hist.appendChild(row);
+        });
+    });
+}
+
+function redeemReward(item) {
+    const r = loadRewards();
+    if (rewardSummary(r).balance < item.cost) return;
+    const entry = { id: newItemId(), at: Date.now(), name: item.name, cost: item.cost };
+    r.redeems.push(entry);
+    saveRewards(r);
+    playTone('alarm');
+    updateRewardBadge();
+    showToast(`已兌換「${item.name}」，−${item.cost} ⭐ 好好享受！`, '復原', () => cancelRedeem(entry.id, true), 8000);
+}
+function cancelRedeem(id, quiet) {
+    const r = loadRewards();
+    r.redeems = r.redeems.filter(x => x.id !== id);
+    saveRewards(r);
+    if (!quiet) playTone('delete');
+    updateRewardBadge();
+}
+function removeShopItem(item) {
+    const r = loadRewards();
+    const before = rewardShop(r).slice();
+    r.shop = before.filter(x => x.id !== item.id);
+    saveRewards(r);
+    playTone('delete');
+    updateRewardBadge();
+    showToast(`已從商店移除「${item.name}」`, '復原', () => { const x = loadRewards(); x.shop = before; saveRewards(x); updateRewardBadge(); }, 7000);
+}
+function addShopItem() {
+    const nameEl = document.getElementById('rwNewName'), costEl = document.getElementById('rwNewCost');
+    const name = nameEl.value.trim().slice(0, 100);
+    const cost = cleanInt(costEl.value, 1, 9999, null);
+    if (!name) { nameEl.focus(); return; }
+    if (cost === null) { costEl.focus(); return; }
+    const r = loadRewards();
+    r.shop = [...rewardShop(r), { id: newItemId(), name, cost }];
+    saveRewards(r);
+    playTone('click');
+    nameEl.value = ''; costEl.value = '';
+    updateRewardBadge();
+}
+document.getElementById('rwAdd').addEventListener('click', addShopItem);
+['rwNewName', 'rwNewCost'].forEach(id => document.getElementById(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addShopItem(); }
+}));
+
+function openRewards() { settleRewards(); renderRewards(); toggleModal(true, 'rewardModal'); }
+
+// 兩台裝置都改過獎勵資料時的合併：商店與兌換逐項合併，點數設定逐類別，已結算的日子取比較大的數字
+function mergeRewards(baseStr, localStr, remoteStr) {
+    const parse = s => { try { return cleanRewards(JSON.parse(s || 'null')); } catch (err) { return cleanRewards(null); } };
+    const b = parse(baseStr), l = parse(localStr), r = parse(remoteStr);
+    const pick = (bv, lv, rv) => (sameJSON(lv, bv) ? rv : lv);
+    const out = { weights: {}, redeems: [], days: {} };
+    new Set([...Object.keys(b.weights), ...Object.keys(l.weights), ...Object.keys(r.weights)]).forEach(k => {
+        const v = pick(b.weights[k], l.weights[k], r.weights[k]);
+        if (v !== undefined) out.weights[k] = v;
+    });
+    const other = pick(b.other, l.other, r.other);
+    if (other !== undefined) out.other = other;
+    const shop = pick(b.shop, l.shop, r.shop) === undefined ? undefined
+        : mergeList(withIds(rewardShop(b), x => x.id), withIds(rewardShop(l), x => x.id), withIds(rewardShop(r), x => x.id));
+    if (shop !== undefined) out.shop = shop;
+    const ids = x => withIds(x.redeems, y => y.id);
+    out.redeems = mergeList(ids(b), ids(l), ids(r)).sort((x, y) => x.at - y.at);
+    [l.days, r.days].forEach(days => Object.entries(days).forEach(([d, v]) => {
+        const cur = out.days[d];
+        out.days[d] = cur ? { e: Math.max(cur.e, v.e), s: Math.max(cur.s, v.s) } : v;
+    }));
+    // 已經結算的日子，不再保留那天的兌換明細
+    out.redeems = out.redeems.filter(x => !out.days[dateKey(x.at)]);
+    return JSON.stringify(out);
+}
+
 /* --- 8. 給同步模組 (sync.js) 用的介面 --- */
 window.pomodoroApp = {
-    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG },
+    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG, rewards: STORAGE_KEY_REWARDS },
 
     // 雲端硬碟的檔案：內容與檔案編號（編號放在時長設定裡一起同步，兩台裝置寫同一個檔案）
     buildDriveText,
@@ -2372,7 +2670,7 @@ window.pomodoroApp = {
     setDriveFileId(id) { timerSettings.driveFileId = id; saveTimerSettings(); },
 
     // 可以逐項合併的資料（任務庫、行程）
-    mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED],
+    mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED, STORAGE_KEY_REWARDS],
     merge: mergeStored,
 
     // 計時狀態的版本時間（越大越新）；其他資料沒有版本，回傳 null
@@ -2392,8 +2690,9 @@ window.pomodoroApp = {
             setTimeout(() => this.applyRemote(key), 1000);
             return;
         }
-        if (key === STORAGE_KEY_CATS) renderCategoriesFromStorage();
+        if (key === STORAGE_KEY_CATS) { renderCategoriesFromStorage(); updateRewardBadge(); } // 點數依任務所屬類別計算
         else if (key === STORAGE_KEY_SCHED) renderScheduleFromStorage();
+        else if (key === STORAGE_KEY_REWARDS) updateRewardBadge();
         // 另一台裝置開始、暫停或切換了計時：照它的狀態接續。
         // 排到稍後再做，這樣接續後如果馬上發現時間已到而結束，產生的變動才會正常同步出去
         else if (key === STORAGE_KEY_STATE) setTimeout(adoptRemoteTimerState, 0);
@@ -2419,6 +2718,7 @@ const ACTIONS = {
     'open-settings': () => { renderSettings(); toggleModal(true, 'settingsModal'); },
     'open-stats': () => openStatsModal(),
     'open-ai': () => openAiModal(),
+    'open-rewards': () => openRewards(),
     'stats-prev': () => shiftStats(-1),
     'stats-next': () => shiftStats(1),
     'open-sync': () => toggleModal(true, 'syncModal'),
