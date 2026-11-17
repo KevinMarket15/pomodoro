@@ -1,3 +1,6 @@
+/* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
+const APP_VERSION = '2026.11.17.1';
+
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
 try {
@@ -3280,6 +3283,10 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 
 window.addEventListener('DOMContentLoaded', () => {
     initApp();
+    document.querySelectorAll('.app-version').forEach(el => { el.textContent = `版本 ${APP_VERSION}`; });
+    // 這台裝置上次看到的是別的版本：提示已經更新（第一次開啟不提示）
+    if (prefs.lastVersion && prefs.lastVersion !== APP_VERSION) showToast(`已更新到版本 ${APP_VERSION}`, null, null, 6000);
+    if (prefs.lastVersion !== APP_VERSION) { prefs.lastVersion = APP_VERSION; savePrefs(); }
     setTimeout(checkNewDay, 2500); // 稍等一下，讓雲端同步先把別台裝置的最新狀態帶進來
     setTimeout(() => autoDriveSave(true), 9000); // 每次開啟也更新一次雲端硬碟的檔案（等同步連上之後）
 });
