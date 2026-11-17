@@ -2395,14 +2395,16 @@ function adoptRemoteTimerState() {
  *   expenses [{id, at, acc, name, amount}]   支出（可以透支）
  *   transfers [{id, at, from, to, amount}]   帳戶之間轉帳
  *   days     { 'YYYY-MM-DD': {e: 賺到, s: 兌換花掉的星星} }  已結算的日子
- *            （舊版的 d／x 是存入、支出娛樂帳戶的錢，仍會讀取；新版的錢的明細不結算，一直保留）
+ *            （舊版的 d／x 是存入、支出娛樂帳戶的錢，仍會讀取）
+ *   archive  { 'YYYY-MM': { 帳戶: [存入, 底薪, 支出, 轉入, 轉出, 存入用掉的星星] } }
+ *            錢的明細和時間記錄一樣保留一年，更早的月份結算成每月總數（見 settleRewards）
  * 舊版的 fund（單一娛樂基金）讀取時會轉成編號 fun 的「娛樂」帳戶。
  * 點數不另外存「餘額」：某一天在 days 裡就用結算的數字，否則從時間記錄與 redeems 現算。
  * 最近 REWARD_LIVE_DAYS 天不結算，所以修改、刪除最近的記錄會反映在點數上；記錄保留一年後刪掉也不影響已結算的點數。 */
 function cleanInt(v, min, max, d) { const n = Math.round(Number(v)); return Number.isFinite(n) && n >= min && n <= max ? n : d; }
 function cleanRewards(raw) {
     const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
-    const out = { weights: {}, redeems: [], days: {} };
+    const out = { weights: {}, redeems: [], days: {}, archive: {} };
     if (r.weights && typeof r.weights === 'object') {
         Object.keys(r.weights).slice(0, 100).forEach(k => {
             const w = cleanInt(r.weights[k], 0, REWARD_MAX_WEIGHT, null);
@@ -2451,6 +2453,16 @@ function cleanRewards(raw) {
     out.expenses = list(r.expenses, x => ({ id: id(x), at: x.at, acc: acc(x.acc), name: cleanText(x.name, 100), amount: cleanInt(x.amount, 1, 1e9, 1) }));
     out.transfers = list(r.transfers, x => ({ id: id(x), at: x.at, from: acc(x.from), to: acc(x.to), amount: cleanInt(x.amount, 1, 1e9, 1) }))
         .filter(x => x.from !== x.to);
+    if (r.archive && typeof r.archive === 'object') {
+        Object.keys(r.archive).filter(k => /^\d{4}-\d{2}$/.test(k)).slice(-600).forEach(m => {
+            const month = r.archive[m] && typeof r.archive[m] === 'object' ? r.archive[m] : {};
+            out.archive[m] = {};
+            Object.keys(month).slice(0, 50).forEach(a => {
+                const v = Array.isArray(month[a]) ? month[a] : [];
+                out.archive[m][cleanText(a, 40)] = [0, 1, 2, 3, 4, 5].map(i => cleanInt(v[i], 0, 1e12, 0));
+            });
+        });
+    }
     return out;
 }
 function rewardAccounts(r) { return r.accounts || []; }
@@ -2510,6 +2522,7 @@ function rewardSummary(r = loadRewards()) {
         if (date >= from30) last30 += d.e;
     });
     r.deposits.forEach(x => { spent += x.stars; });
+    Object.values(r.archive).forEach(m => Object.values(m).forEach(v => { spent += v[5]; }));
     const today = live[todayKey()] || r.days[todayKey()] || { e: 0, s: 0, ds: 0 };
     return { earned, spent, balance: earned - spent, today, live, level: levelOf(earned), last30 };
 }
@@ -2521,10 +2534,33 @@ function settleRewards() {
     const live = liveRewardDays(r);
     const old = Object.keys(live).filter(d => d < cutoff);
     const recent = x => dateKey(x.at) >= cutoff;
-    if (!old.length && r.redeems.every(recent)) return;
+    const archived = archiveOldMoney(r);
+    if (!old.length && r.redeems.every(recent) && !archived) return;
     old.forEach(d => { r.days[d] = { e: live[d].e, s: live[d].s }; });
     r.redeems = r.redeems.filter(recent);
     saveRewards(r);
+}
+
+// 錢的明細保留一年：一年前那個月之前的月份，結算成每個帳戶的每月總數。回傳有沒有變動
+function archiveOldMoney(r) {
+    const keepFrom = addDays(todayKey(), -LOG_KEEP_DAYS).slice(0, 7); // 這個月份（含）之後的明細保留
+    const monthOf = x => dateKey(x.at).slice(0, 7);
+    const lists = ['deposits', 'grants', 'expenses', 'transfers'];
+    if (lists.every(k => r[k].every(x => monthOf(x) >= keepFrom))) return false;
+    const fresh = {}; // 這次才結算的月份（別台裝置已經結算過的月份，直接丟掉明細）
+    const add = (m, acc, i, v) => {
+        if (r.archive[m] && !fresh[m]) return;
+        if (!r.archive[m]) { r.archive[m] = {}; fresh[m] = true; }
+        const row = r.archive[m][acc] || (r.archive[m][acc] = [0, 0, 0, 0, 0, 0]);
+        row[i] += v;
+    };
+    const old = x => monthOf(x) < keepFrom;
+    r.deposits.filter(old).forEach(x => { add(monthOf(x), x.acc, 0, x.amount); add(monthOf(x), x.acc, 5, x.stars); });
+    r.grants.filter(old).forEach(x => add(monthOf(x), x.acc, 1, x.amount));
+    r.expenses.filter(old).forEach(x => add(monthOf(x), x.acc, 2, x.amount));
+    r.transfers.filter(old).forEach(x => { add(monthOf(x), x.to, 3, x.amount); add(monthOf(x), x.from, 4, x.amount); });
+    lists.forEach(k => { r[k] = r[k].filter(x => !old(x)); });
+    return true;
 }
 
 // 主畫面的點數按鈕
@@ -2682,6 +2718,7 @@ function accountStats(r) {
     r.grants.forEach(x => { add(x.acc, 'balance', x.amount); if (inMonth(x.at)) add(x.acc, 'monthBase', x.amount); });
     r.expenses.forEach(x => { add(x.acc, 'balance', -x.amount); if (inMonth(x.at)) add(x.acc, 'monthOut', x.amount); });
     r.transfers.forEach(x => { add(x.from, 'balance', -x.amount); add(x.to, 'balance', x.amount); });
+    Object.values(r.archive).forEach(m => Object.entries(m).forEach(([acc, v]) => add(acc, 'balance', v[0] + v[1] - v[2] + v[3] - v[4])));
     Object.entries(r.days).forEach(([d, v]) => { // 舊版娛樂基金已結算的存入／支出
         add('fun', 'balance', (v.d || 0) - (v.x || 0));
         if (d.startsWith(thisMonth())) { add('fun', 'monthIn', v.d || 0); add('fun', 'monthOut', v.x || 0); }
@@ -2964,6 +3001,144 @@ document.getElementById('rwAdd').addEventListener('click', addShopItem);
     if (e.key === 'Enter') { e.preventDefault(); addShopItem(); }
 }));
 
+/* 匯出獎勵明細：每日、每週（週一到週日）、每月 */
+let exUnit = 'day', exAnchor = todayKey();
+
+function exportRange() {
+    if (exUnit === 'day') return { from: exAnchor, to: exAnchor, label: `${shortDate(exAnchor)}（${weekdayText(exAnchor)}）` };
+    if (exUnit === 'week') {
+        const back = (new Date(`${exAnchor}T00:00`).getDay() + 6) % 7; // 距離週一幾天
+        const from = addDays(exAnchor, -back), to = addDays(from, 6);
+        return { from, to, label: `${shortDate(from)} – ${shortDate(to)}` };
+    }
+    const from = `${exAnchor.slice(0, 7)}-01`;
+    const to = addDays(nextMonthStart(from), -1);
+    return { from, to, label: `${from.slice(0, 4)} 年 ${Number(from.slice(5, 7))} 月` };
+}
+function nextMonthStart(first) {
+    const y = Number(first.slice(0, 4)), m = Number(first.slice(5, 7));
+    return m === 12 ? `${y + 1}-01-01` : `${y}-${String(m + 1).padStart(2, '0')}-01`;
+}
+function shiftExport(dir) {
+    if (exUnit === 'day') exAnchor = addDays(exAnchor, dir);
+    else if (exUnit === 'week') exAnchor = addDays(exAnchor, dir * 7);
+    else {
+        const first = `${exAnchor.slice(0, 7)}-01`;
+        exAnchor = dir > 0 ? nextMonthStart(first) : addDays(first, -1).slice(0, 7) + '-01';
+    }
+    if (exAnchor > todayKey()) exAnchor = todayKey();
+    playTone('click');
+    renderExport();
+}
+
+// 這段期間的明細列與總計
+function rewardExportData(from, to) {
+    const r = loadRewards();
+    const s = rewardSummary(r);
+    const accName = id => { const a = rewardAccounts(r).find(x => x.id === id); return a ? a.name : '已刪除的帳戶'; };
+    const inRange = at => { const d = dateKey(at); return d >= from && d <= to; };
+    const rows = [];
+    const sum = { e: 0, redeem: 0, depositStars: 0, acc: {} };
+    const accSum = id => sum.acc[id] || (sum.acc[id] = { dep: 0, base: 0, exp: 0, tin: 0, tout: 0 });
+    const row = (at, date, type, account, item, stars, amount) => rows.push({ at, date, time: at ? clockText(at) : '', type, account, item, stars, amount });
+
+    // 每天賺到的星星（一天一列）；已結算日子的兌換只剩合計
+    const pomos = {};
+    loadLogs().forEach(l => { const d = dateKey(l.end); if (d >= from && d <= to) pomos[d] = (pomos[d] || 0) + pomodorosOf(l); });
+    for (let d = from; d <= to; d = addDays(d, 1)) {
+        const settled = r.days[d], live = s.live[d];
+        const e = settled ? settled.e : (live ? live.e : 0);
+        if (e) { row(0, d, '賺星星', '', `完成 ${pomos[d] || 0} 顆蕃茄`, e, ''); sum.e += e; }
+        if (settled && settled.s) { row(0, d, '兌換（合計）', '', '這天的兌換', -settled.s, ''); sum.redeem += settled.s; }
+    }
+    r.redeems.filter(x => inRange(x.at)).forEach(x => { row(x.at, dateKey(x.at), '兌換', '', x.name, -x.cost, ''); sum.redeem += x.cost; });
+    r.deposits.filter(x => inRange(x.at)).forEach(x => {
+        row(x.at, dateKey(x.at), '存入', accName(x.acc), '星星存入帳戶', -x.stars, x.amount);
+        sum.depositStars += x.stars; accSum(x.acc).dep += x.amount;
+    });
+    r.grants.filter(x => inRange(x.at)).forEach(x => { row(x.at, dateKey(x.at), '底薪', accName(x.acc), '每月底薪', '', x.amount); accSum(x.acc).base += x.amount; });
+    r.expenses.filter(x => inRange(x.at)).forEach(x => { row(x.at, dateKey(x.at), '支出', accName(x.acc), x.name || '支出', '', -x.amount); accSum(x.acc).exp += x.amount; });
+    r.transfers.filter(x => inRange(x.at)).forEach(x => {
+        row(x.at, dateKey(x.at), '轉帳', `${accName(x.from)} → ${accName(x.to)}`, '帳戶之間轉帳', '', x.amount);
+        accSum(x.from).tout += x.amount; accSum(x.to).tin += x.amount;
+    });
+    rows.sort((a, b) => (a.date === b.date ? (a.at || 0) - (b.at || 0) : a.date < b.date ? -1 : 1));
+
+    // 超過一年、已結算的月份只剩總數
+    const archivedMonths = Object.keys(r.archive).filter(m => m >= from.slice(0, 7) && m <= to.slice(0, 7));
+    archivedMonths.forEach(m => Object.entries(r.archive[m]).forEach(([acc, v]) => {
+        const a = accSum(acc);
+        a.dep += v[0]; a.base += v[1]; a.exp += v[2]; a.tin += v[3]; a.tout += v[4];
+        sum.depositStars += v[5];
+    }));
+    const lines = [`賺到 ${sum.e} 顆星，兌換 ${sum.redeem} 顆，存入帳戶 ${sum.depositStars} 顆`];
+    Object.entries(sum.acc).forEach(([id, a]) => {
+        const parts = [];
+        if (a.dep) parts.push(`存入 ${money(a.dep)}`);
+        if (a.base) parts.push(`底薪 ${money(a.base)}`);
+        if (a.exp) parts.push(`支出 ${money(a.exp)}`);
+        if (a.tin) parts.push(`轉入 ${money(a.tin)}`);
+        if (a.tout) parts.push(`轉出 ${money(a.tout)}`);
+        if (parts.length) lines.push(`${accName(id)}：${parts.join('、')}`);
+    });
+    if (archivedMonths.length) lines.push('（超過一年的明細已結算，只有每月總數）');
+    return { rows, lines };
+}
+
+function rewardCSV(data) {
+    const header = ['日期', '時間', '類型', '帳戶', '內容', '星星', '金額(NT$)'];
+    const rows = data.rows.map(x => [x.date, x.time, x.type, x.account, x.item, x.stars, x.amount]);
+    // 數字直接輸出（csvCell 會在負號前加 ' 防止被當成公式，數字不需要）
+    const cell = v => (typeof v === 'number' ? String(v) : csvCell(v));
+    return '﻿' + [header, ...rows].map(row => row.map(cell).join(',')).join('\r\n');
+}
+function rewardMarkdown(data, label) {
+    const lines = [`# 獎勵明細：${label}`, '', ...data.lines.map(l => `- ${mdCell(l)}`), ''];
+    if (data.rows.length) {
+        lines.push('| 日期 | 時間 | 類型 | 帳戶 | 內容 | 星星 | 金額(NT$) |', '|---|---|---|---|---|---:|---:|');
+        data.rows.forEach(x => lines.push(`| ${[x.date, x.time, x.type, x.account, x.item, x.stars, x.amount].map(mdCell).join(' | ')} |`));
+    } else lines.push('（這段期間沒有明細）');
+    return lines.join('\n') + '\n';
+}
+
+function renderExport() {
+    const { from, to, label } = exportRange();
+    document.querySelectorAll('#exUnit .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.unit === exUnit));
+    document.getElementById('exLabel').textContent = label;
+    document.getElementById('exNext').disabled = to >= todayKey();
+    // 最早可以看到：一年前，或更早已結算（只剩總數）的月份
+    const months = Object.keys(loadRewards().archive).sort();
+    const earliest = months.length && `${months[0]}-01` < addDays(todayKey(), -LOG_KEEP_DAYS) ? `${months[0]}-01` : addDays(todayKey(), -LOG_KEEP_DAYS);
+    document.getElementById('exPrev').disabled = from <= earliest;
+    const data = rewardExportData(from, to);
+    document.getElementById('exSummary').textContent = data.lines.join('\n') + `\n共 ${data.rows.length} 筆明細`;
+}
+function doExport(kind) {
+    const { from, to, label } = exportRange();
+    const data = rewardExportData(from, to);
+    const name = exUnit === 'day' ? from : exUnit === 'week' ? `${from}_${to}` : from.slice(0, 7);
+    playTone('click');
+    if (kind === 'csv') downloadFile(`rewards_${name}.csv`, rewardCSV(data), 'text/csv;charset=utf-8');
+    else if (kind === 'md') downloadFile(`rewards_${name}.md`, rewardMarkdown(data, label), 'text/markdown;charset=utf-8');
+    else copyText(rewardMarkdown(data, label)).then(ok => {
+        const btn = document.getElementById('exCopy');
+        btn.textContent = ok ? '✓ 已複製' : '複製失敗';
+        setTimeout(() => { btn.textContent = '📋 複製'; }, 1500);
+    });
+}
+document.getElementById('exUnit').addEventListener('click', (e) => {
+    const btn = e.target.closest('.seg-btn'); if (!btn) return;
+    playTone('click');
+    exUnit = btn.dataset.unit; exAnchor = todayKey();
+    renderExport();
+});
+document.getElementById('exPrev').addEventListener('click', () => shiftExport(-1));
+document.getElementById('exNext').addEventListener('click', () => shiftExport(1));
+document.getElementById('exCsv').addEventListener('click', () => doExport('csv'));
+document.getElementById('exMd').addEventListener('click', () => doExport('md'));
+document.getElementById('exCopy').addEventListener('click', () => doExport('copy'));
+document.getElementById('exDetails').addEventListener('toggle', (e) => { if (e.target.open) { exUnit = 'day'; exAnchor = todayKey(); renderExport(); } });
+
 function openRewards() { settleRewards(); grantBaseSalaries(); fundMsg(''); renderRewards(); toggleModal(true, 'rewardModal'); }
 
 // 兩台裝置都改過獎勵資料時的合併：商店與兌換逐項合併，點數設定逐類別，已結算的日子取比較大的數字
@@ -2971,7 +3146,7 @@ function mergeRewards(baseStr, localStr, remoteStr) {
     const parse = s => { try { return cleanRewards(JSON.parse(s || 'null')); } catch (err) { return cleanRewards(null); } };
     const b = parse(baseStr), l = parse(localStr), r = parse(remoteStr);
     const pick = (bv, lv, rv) => (sameJSON(lv, bv) ? rv : lv);
-    const out = { weights: {}, redeems: [], deposits: [], grants: [], expenses: [], transfers: [], days: {} };
+    const out = { weights: {}, redeems: [], deposits: [], grants: [], expenses: [], transfers: [], days: {}, archive: {} };
     new Set([...Object.keys(b.weights), ...Object.keys(l.weights), ...Object.keys(r.weights)]).forEach(k => {
         const v = pick(b.weights[k], l.weights[k], r.weights[k]);
         if (v !== undefined) out.weights[k] = v;
@@ -2992,7 +3167,13 @@ function mergeRewards(baseStr, localStr, remoteStr) {
         ['e', 's', 'd', 'x'].forEach(k => { const n = Math.max(cur[k] || 0, v[k] || 0); if (n || k === 'e' || k === 's') m[k] = n; });
         out.days[d] = m;
     }));
-    // 已經結算的日子，不再保留那天的兌換明細（錢的明細一直保留）
+    // 已結算的月份：每個欄位取較大的數字，並丟掉那些月份的明細
+    [l.archive, r.archive].forEach(arc => Object.entries(arc).forEach(([m, accs]) => {
+        const cur = out.archive[m] || (out.archive[m] = {});
+        Object.entries(accs).forEach(([acc, v]) => { cur[acc] = cur[acc] ? cur[acc].map((n, i) => Math.max(n, v[i])) : v.slice(); });
+    }));
+    ['deposits', 'grants', 'expenses', 'transfers'].forEach(k => { out[k] = out[k].filter(x => !out.archive[dateKey(x.at).slice(0, 7)]); });
+    // 已經結算的日子，不再保留那天的兌換明細
     out.redeems = out.redeems.filter(x => !out.days[dateKey(x.at)]);
     return JSON.stringify(out);
 }

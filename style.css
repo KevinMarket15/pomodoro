@@ -555,3 +555,7 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 .ac-field { display: flex; flex-direction: column; gap: 4px; font-size: 0.72rem; color: var(--faint); min-width: 0; }
 .ac-field .text-input { max-width: none; width: 100%; box-sizing: border-box; }
 @media (max-width: 420px) { .ac-edit-grid { grid-template-columns: 1fr 1fr; } }
+.ex-unit { margin: 10px 0 6px; display: inline-flex; }
+.ex-nav { padding-right: 0; margin: 4px 0; justify-content: center; }
+.ex-nav span { min-width: 150px; text-align: center; }
+.ex-summary { white-space: pre-line; line-height: 1.6; }

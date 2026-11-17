@@ -320,6 +320,26 @@
                 </div>
                 <div class="setting-note">「每月星星存入上限」是每個月最多能用星星換進這個帳戶的錢，填 0 表示不能存星星。「每月底薪」適合吃飯、交通這類必要開銷：每個月第一次打開時自動放進帳戶，不靠星星；當月還沒用完的底薪不能轉到別的帳戶。建議匯率＝所有帳戶的存入上限加總 ÷ 最近 30 天賺到的星星，照最近的努力程度剛好能把每個帳戶存滿。這只是幫你記帳，不會動到真正的錢。</div>
             </details>
+            <details class="rw-details" id="exDetails">
+                <summary>匯出明細</summary>
+                <div class="seg ex-unit" id="exUnit">
+                    <button class="seg-btn active" data-unit="day">每日</button>
+                    <button class="seg-btn" data-unit="week">每週</button>
+                    <button class="seg-btn" data-unit="month">每月</button>
+                </div>
+                <div class="log-nav ex-nav">
+                    <button class="log-nav-btn" id="exPrev" title="上一段">‹</button>
+                    <span id="exLabel"></span>
+                    <button class="log-nav-btn" id="exNext" title="下一段">›</button>
+                </div>
+                <div class="log-pending ex-summary" id="exSummary"></div>
+                <div class="data-actions">
+                    <button class="action-btn export" id="exCsv">⬇ CSV</button>
+                    <button class="action-btn" id="exMd">⬇ Markdown</button>
+                    <button class="action-btn" id="exCopy">📋 複製</button>
+                </div>
+                <div class="setting-note">包含賺到與花掉的星星、各帳戶的存入、底薪、支出與轉帳。明細和時間記錄一樣保留一年，更早的只留每月總數。CSV 可以用 Excel 或 Google 試算表開；Markdown 和「複製」適合貼到筆記或給 AI 看。</div>
+            </details>
             <details class="rw-details">
                 <summary>最近 7 天的點數紀錄</summary>
                 <div id="rwHistory"></div>
