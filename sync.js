@@ -115,6 +115,35 @@ window.addEventListener('online', () => {
 });
 window.addEventListener('offline', refreshStatus);
 
+/* --- 切回網頁時重新同步 ---
+ * 手機把網頁放到背景時會暫停程式與網路，即時監聽的連線常常就斷了；
+ * 回到前景後 Firebase 不一定馬上重連，計時狀態就會停在舊的。所以回到前景時：
+ *   1. 重新開關一次連線，讓即時監聽重新向伺服器取得最新資料
+ *   2. 保險起見，直接向伺服器讀一次計時狀態（只多 1 次讀取）
+ *   3. 背景期間沒傳上去的修改補傳 */
+let lastResync = 0;
+async function resyncOnReturn() {
+    if (!uid || !connected || !navigator.onLine || document.hidden) return;
+    if (Date.now() - lastResync < 3000) return; // 切換很頻繁時不要一直重連
+    lastResync = Date.now();
+    try { await fb.disableNetwork(db); await fb.enableNetwork(db); } catch (err) { console.error('[sync] 重新連線失敗', err); }
+    try {
+        const snap = await fb.getDocFromServer(fb.doc(db, 'users', uid, 'kv', 'state'));
+        if (snap.exists()) {
+            const value = snap.data().value;
+            const localRev = app.revOf(K.state, localStorage.getItem(K.state));
+            if (app.revOf(K.state, value) > localRev) { // 雲端的比較新才採用（和 onKvSnapshot 的規則一樣）
+                clearDirty(K.state);
+                applyLocal(K.state, value);
+            }
+        }
+    } catch (err) { console.error('[sync] 讀取計時狀態失敗', err); }
+    if (Object.keys(readMeta().dirty).length) flush();
+    refreshStatus();
+}
+document.addEventListener('visibilitychange', resyncOnReturn);
+window.addEventListener('pageshow', (e) => { if (e.persisted) resyncOnReturn(); }); // 從瀏覽器的「上一頁快取」回來
+
 /* --- 本機有變動：記下來，稍後上傳 --- */
 window.addEventListener('pomodoro:change', (e) => {
     const key = e.detail.key;
