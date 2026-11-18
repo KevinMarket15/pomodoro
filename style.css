@@ -371,6 +371,10 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
 .stats-row-track { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .stats-row-fill { height: 100%; border-radius: 3px; }
 .stats-empty { font-size: 0.85rem; color: var(--faint); }
+.stats-done-day { font-size: 0.85rem; }
+.stats-done-day summary { cursor: pointer; padding: 2px 0; }
+.stats-done-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 8px; padding: 3px 0 3px 16px; }
+.stats-done-dot { width: 8px; height: 8px; border-radius: 50%; }
 
 /* --- 時間記錄：單筆修改 --- */
 .log-table td.log-task.editable { cursor: text; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }

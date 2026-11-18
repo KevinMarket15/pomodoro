@@ -2,7 +2,8 @@
  * 資料仍以 localStorage 為主，這裡只負責和雲端互相同步：
  *   users/{uid}/kv/{名稱}   任務庫、行程、時長設定、計時狀態、獎勵，各一份
  *                           任務庫、行程與獎勵：兩邊都改過時逐項合併（見 script.js 的 mergeStored）
- *                           計時狀態：比版本時間，新的贏；時長設定：以最後寫入為準
+ *                           完成任務的歷史：逐筆合併；時長設定：逐欄合併
+ *                           計時狀態：比版本時間，新的贏
  *   users/{uid}/logs/{id}   每筆時間記錄一份，兩台裝置的記錄會合併（今日蕃茄數由記錄算出）
  *
  * 記錄保留一年，可能有幾千筆。為了不要每次開網頁都把全部讀一遍（免費額度有每日讀取上限）：
@@ -20,7 +21,7 @@ const FULL_SYNC_DAYS = 7;   // 每隔幾天完整核對一次（必須小於上�
 const app = window.pomodoroApp;
 const K = app.keys;
 // 雲端文件名稱 ↔ localStorage key
-const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer, state: K.state, rewards: K.rewards, reminders: K.reminders };
+const KV = { categories: K.categories, schedule: K.schedule, timer: K.timer, state: K.state, rewards: K.rewards, reminders: K.reminders, done: K.done };
 const KV_NAME = Object.fromEntries(Object.entries(KV).map(([name, key]) => [key, name]));
 
 let fb = null;            // 載入後的 Firebase 函式

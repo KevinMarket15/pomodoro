@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.17.4';
+const APP_VERSION = '2026.11.18.1';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -100,6 +100,7 @@ const STORAGE_KEY_TIMER = 'pomodoro_timer_v5';
 const STORAGE_KEY_STATE = 'pomodoro_state_v5'; // 計時狀態，重新整理後可接續
 const STORAGE_KEY_LOG = 'pomodoro_log_v1';     // 時間記錄
 const STORAGE_KEY_REMIND = 'pomodoro_reminders_v1'; // 定時提醒
+const STORAGE_KEY_DONE = 'pomodoro_done_v1'; // 完成任務的歷史（保留一年）
 const REMIND_FIRED_KEY = 'pomodoro_reminder_fired'; // 這台裝置今天已經響過的提醒（不同步）
 const LOG_KEEP_DAYS = 365;
 const MAX_IMPORT_BYTES = 5 * 1024 * 1024;
@@ -174,6 +175,17 @@ function cleanLog(l) {
     if (l.countUp) { entry.countUp = true; entry.pomodoros = Math.floor(num(l.pomodoros)); }
     if (l.manual) entry.manual = true; // 事後補登的
     return entry;
+}
+// 完成任務的歷史：[{id（行程卡的編號）, name, color, at（完成時間）}]，依完成時間排序，保留一年
+function cleanDone(raw) {
+    if (!Array.isArray(raw)) return [];
+    const cutoff = Date.now() - LOG_KEEP_DAYS * 24 * 60 * 60 * 1000;
+    const seen = new Set();
+    return raw.filter(d => d && typeof d === 'object' && cleanText(d.name) && Number.isFinite(d.at) && d.at >= cutoff)
+        .map(d => ({ id: cleanText(d.id, 40), name: cleanText(d.name), color: cleanColor(d.color), at: d.at }))
+        .filter(d => d.id && !seen.has(d.id) && seen.add(d.id))
+        .sort((a, b) => a.at - b.at)
+        .slice(-5000);
 }
 function readStoredJSON(key) {
     try { return JSON.parse(localStorage.getItem(key) || 'null'); } catch (err) { return null; }
@@ -898,8 +910,25 @@ function saveSchedule() {
         schedule.push(item);
     });
     storeSet(STORAGE_KEY_SCHED, JSON.stringify(schedule));
+    recordDone(schedule);
     updateCurrentTask();
     updateDoneToggle();
+}
+
+function loadDone() { return cleanDone(readStoredJSON(STORAGE_KEY_DONE)); }
+// 行程卡標記完成時記進歷史、取消完成時從歷史移除；卡片之後被清掉（隔天、刪除）歷史仍保留
+function recordDone(schedule) {
+    const byId = new Map(loadDone().map(d => [d.id, d]));
+    let changed = false;
+    schedule.forEach(t => {
+        if (!t || !t.id) return;
+        const d = byId.get(t.id);
+        if (t.done && Number.isFinite(t.doneAt)) {
+            const entry = { id: t.id, name: t.name, color: cleanColor(t.color), at: t.doneAt };
+            if (!d || JSON.stringify(d) !== JSON.stringify(entry)) { byId.set(t.id, entry); changed = true; }
+        } else if (!t.done && d) { byId.delete(t.id); changed = true; }
+    });
+    if (changed) storeSet(STORAGE_KEY_DONE, JSON.stringify(cleanDone([...byId.values()])));
 }
 
 /* --- 4. 動態 DOM --- */
@@ -918,6 +947,9 @@ function renderScheduleFromStorage() {
     const kept = items.filter(t => !(t.done && dateKey(t.doneAt) !== today)); // 前幾天完成的任務清掉
     kept.forEach(t => appendScheduleCard(t.name, t.color, null, t.done ? t.doneAt : null, t.est, t.id, t));
     if (kept.length !== items.length) saveSchedule();
+    // 別台裝置（可能是舊版、不會記歷史）傳來的完成狀態也記進歷史。
+    // 排到稍後做：套用雲端資料的當下寫入的變動不會被上傳
+    setTimeout(() => recordDone(items), 0);
     updateCurrentTask();
     updateDoneToggle();
 }
@@ -1152,6 +1184,7 @@ window.resetToDefault = async function() {
     localStorage.removeItem(STORAGE_KEY_LOG);
     localStorage.removeItem(STORAGE_KEY_REWARDS);
     localStorage.removeItem(STORAGE_KEY_REMIND);
+    localStorage.removeItem(STORAGE_KEY_DONE);
     location.reload();
 }
 
@@ -1676,6 +1709,10 @@ function renderStats() {
         byCat[catName].sec += l.actualSec;
     });
 
+    const done = loadDone().filter(d => { const k = dateKey(d.at); return k >= from && k <= statsEnd; });
+    const doneByDay = Object.fromEntries(days.map(d => [d, []]));
+    done.forEach(d => doneByDay[dateKey(d.at)].push(d));
+
     const totalSec = logs.reduce((sum, l) => sum + l.actualSec, 0);
     const totalPomo = logs.reduce((sum, l) => sum + pomodorosOf(l), 0);
     const activeDays = days.filter(d => perDay[d].sec > 0).length;
@@ -1683,7 +1720,8 @@ function renderStats() {
     document.getElementById('statsSummary').textContent = totalSec
         ? `專注 ${minutesText(totalSec)} 分鐘 · ${totalPomo} 🍅 · 有記錄的 ${activeDays} 天平均每天 ${minutesText(totalSec / activeDays)} 分鐘`
         : '這一週沒有專注記錄。';
-    document.getElementById('statsPrev').disabled = !allFocus.some(l => dateKey(l.start) < from);
+    if (done.length) document.getElementById('statsSummary').textContent += ` · 完成 ${done.length} 項任務`;
+    document.getElementById('statsPrev').disabled = !allFocus.some(l => dateKey(l.start) < from) && !loadDone().some(d => dateKey(d.at) < from);
     document.getElementById('statsNext').disabled = statsEnd >= today;
 
     const chart = document.getElementById('statsChart');
@@ -1701,13 +1739,44 @@ function renderStats() {
         label.textContent = `${weekdayText(d)} ${shortDate(d)}`;
         const pomoEl = document.createElement('div'); pomoEl.className = 'stats-day';
         pomoEl.textContent = pomo ? `${pomo}🍅` : ' ';
-        col.appendChild(value); col.appendChild(bar); col.appendChild(label); col.appendChild(pomoEl);
+        const doneEl = document.createElement('div'); doneEl.className = 'stats-day';
+        doneEl.textContent = doneByDay[d].length ? `✓${doneByDay[d].length}` : ' ';
+        col.appendChild(value); col.appendChild(bar); col.appendChild(label); col.appendChild(pomoEl); col.appendChild(doneEl);
         chart.appendChild(col);
     });
 
     const sorted = obj => Object.values(obj).sort((a, b) => b.sec - a.sec);
     fillStatsList('statsTasks', sorted(byTask).slice(0, 12));
     fillStatsList('statsCats', sorted(byCat));
+    fillStatsDone(days, doneByDay);
+}
+
+// 每天完成的任務：每天一行「完成 N 項」，點開看是哪些、幾點完成
+function fillStatsDone(days, doneByDay) {
+    const box = document.getElementById('statsDone');
+    box.innerHTML = '';
+    const withDone = days.filter(d => doneByDay[d].length).reverse(); // 新的日子在上面
+    if (!withDone.length) {
+        const empty = document.createElement('div'); empty.className = 'stats-empty'; empty.textContent = '這一週沒有完成的任務';
+        box.appendChild(empty);
+        return;
+    }
+    withDone.forEach((d, i) => {
+        const det = document.createElement('details'); det.className = 'stats-done-day';
+        if (i === 0) det.open = true;
+        const sum = document.createElement('summary');
+        sum.textContent = `${weekdayText(d)} ${shortDate(d)} · 完成 ${doneByDay[d].length} 項`;
+        det.appendChild(sum);
+        doneByDay[d].forEach(t => {
+            const row = document.createElement('div'); row.className = 'stats-done-row';
+            const dot = document.createElement('span'); dot.className = 'stats-done-dot'; dot.style.background = t.color;
+            const name = document.createElement('span'); name.className = 'stats-row-name'; name.textContent = t.name;
+            const time = document.createElement('span'); time.className = 'stats-row-val'; time.textContent = clockText(t.at);
+            row.appendChild(dot); row.appendChild(name); row.appendChild(time);
+            det.appendChild(row);
+        });
+        box.appendChild(det);
+    });
 }
 
 window.openStatsModal = function() { statsEnd = todayKey(); renderStats(); toggleModal(true, 'statsModal'); };
@@ -2438,7 +2507,27 @@ function mergeStored(key, baseStr, localStr, remoteStr) {
         const prep = s => withIds(cleanReminders(parse(s)), r => r.id);
         return JSON.stringify(mergeList(prep(baseStr), prep(localStr), prep(remoteStr)));
     }
+    if (key === STORAGE_KEY_DONE) {
+        const prep = s => withIds(cleanDone(parse(s)), d => d.id);
+        return JSON.stringify(cleanDone(mergeList(prep(baseStr), prep(localStr), prep(remoteStr))));
+    }
+    if (key === STORAGE_KEY_TIMER) return mergeTimer(baseStr, localStr, remoteStr);
     return localStr;
+}
+
+// 時長設定逐欄合併：這台裝置沒改過的欄位用對方的，兩邊都改了同一欄以這台為準
+function mergeTimer(baseStr, localStr, remoteStr) {
+    const obj = s => {
+        try { const o = JSON.parse(s || '{}'); return o && typeof o === 'object' && !Array.isArray(o) ? o : {}; }
+        catch (err) { return {}; }
+    };
+    const b = obj(baseStr), l = obj(localStr), r = obj(remoteStr);
+    const out = {};
+    new Set([...Object.keys(l), ...Object.keys(r)]).forEach(k => {
+        const v = sameJSON(l[k], b[k]) ? r[k] : l[k];
+        if (v !== undefined) out[k] = v;
+    });
+    return JSON.stringify(out);
 }
 
 // 套用另一台裝置傳來的計時狀態（已經寫進 localStorage）
@@ -3668,15 +3757,15 @@ document.getElementById('doneToggle').addEventListener('click', () => {
 
 /* --- 8. 給同步模組 (sync.js) 用的介面 --- */
 window.pomodoroApp = {
-    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG, rewards: STORAGE_KEY_REWARDS, reminders: STORAGE_KEY_REMIND },
+    keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG, rewards: STORAGE_KEY_REWARDS, reminders: STORAGE_KEY_REMIND, done: STORAGE_KEY_DONE },
 
     // 雲端硬碟的檔案：內容與檔案編號（編號放在時長設定裡一起同步，兩台裝置寫同一個檔案）
     buildDriveText,
     getDriveFileId: () => timerSettings.driveFileId || null,
     setDriveFileId(id) { timerSettings.driveFileId = id; saveTimerSettings(); },
 
-    // 可以逐項合併的資料（任務庫、行程）
-    mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED, STORAGE_KEY_REWARDS, STORAGE_KEY_REMIND],
+    // 可以逐項合併的資料（時長設定是逐欄合併）
+    mergeable: [STORAGE_KEY_CATS, STORAGE_KEY_SCHED, STORAGE_KEY_REWARDS, STORAGE_KEY_REMIND, STORAGE_KEY_DONE, STORAGE_KEY_TIMER],
     merge: mergeStored,
 
     // 計時狀態的版本時間（越大越新）；其他資料沒有版本，回傳 null
@@ -3700,6 +3789,7 @@ window.pomodoroApp = {
         else if (key === STORAGE_KEY_SCHED) renderScheduleFromStorage();
         else if (key === STORAGE_KEY_REWARDS) updateRewardBadge();
         else if (key === STORAGE_KEY_REMIND) renderReminders();
+        else if (key === STORAGE_KEY_DONE) { if (document.getElementById('statsModal').classList.contains('show')) renderStats(); }
         // 另一台裝置開始、暫停或切換了計時：照它的狀態接續。
         // 排到稍後再做，這樣接續後如果馬上發現時間已到而結束，產生的變動才會正常同步出去
         else if (key === STORAGE_KEY_STATE) setTimeout(adoptRemoteTimerState, 0);
