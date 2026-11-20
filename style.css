@@ -514,6 +514,9 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 .points-btn:active { box-shadow: var(--inner-shadow); }
 /* 快速記帳、選任務、結束時間 */
 .current-task.pickable { cursor: pointer; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.qe-past { font-size: 0.8rem; color: var(--accent-color); min-height: 0; margin: -4px 0 6px; }
+.qe-past:empty { display: none; }
+.qe-past button { border: none; background: transparent; color: var(--success-color); font: inherit; cursor: pointer; text-decoration: underline; padding: 0 0 0 6px; }
 .qe-preview { display: block; min-height: 1.2em; margin-top: 6px; font-size: 0.85rem; }
 .qe-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; font-size: 0.85rem; padding: 4px 0; }
 .qe-time { color: var(--faint); font-variant-numeric: tabular-nums; }

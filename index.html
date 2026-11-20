@@ -410,7 +410,12 @@
     <div class="modal-content">
         <button class="modal-close">×</button>
         <div class="modal-section">
-            <div class="modal-title">記一筆支出</div>
+            <div class="modal-title log-nav">
+                <button class="log-nav-btn" id="qePrev" title="前一天">‹</button>
+                <span id="qeTitle">記一筆支出</span>
+                <button class="log-nav-btn" id="qeNext" title="後一天">›</button>
+            </div>
+            <div class="qe-past" id="qePast"></div>
             <div id="qeForm">
                 <div class="rw-add">
                     <input type="text" class="text-input" id="qeText" maxlength="120" placeholder="例如：120 午餐" aria-label="金額和用途" autocomplete="off" enterkeyhint="done">
@@ -426,7 +431,7 @@
             <button class="action-btn" id="qeNoAcc" style="display:none">打開獎勵設定帳戶</button>
             <div class="stats-heading" id="qeTodayHead">今天的支出</div>
             <div id="qeToday"></div>
-            <div class="setting-note">金額和用途打在同一格，順序不拘（「午餐 120」也可以）。記完可以直接接著打下一筆。</div>
+            <div class="setting-note">金額和用途打在同一格，順序不拘（「午餐 120」也可以）。記完可以直接接著打下一筆。用 ‹ › 切到前幾天，可以查看或補記那一天的支出。</div>
         </div>
     </div>
 </div>

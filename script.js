@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.20.1';
+const APP_VERSION = '2026.11.20.2';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -279,6 +279,7 @@ const EXPENSE_TAG = 'pomodoro-expense'; // 每天記帳提醒的通知（點了�
 const ASK_TAG = 'pomodoro-ask';         // 正數太久時問「還在做嗎」的通知
 const ASK_REPEAT_MIN = 30; // 正數問過「還在做嗎」之後，每隔幾分鐘再問一次
 let pickPurpose = null;    // 「現在要做什麼？」視窗開著時的用途，見 openTaskPicker
+let qeDate = null;         // 記帳框目前顯示的日期（null＝今天）
 
 let keepAliveAudio = null;    // 手機背景保持計時用的靜音音訊，見 updateKeepAlive
 let keepAliveStopTimer = null;
@@ -3808,8 +3809,48 @@ function quickExpAccount(r) {
     const accounts = rewardAccounts(r);
     return accById(r, document.getElementById('qeAcc').value) || accById(r, prefs.lastExpAcc) || accounts[0] || null;
 }
+// 記帳框能切到的最早日期：錢的明細保留一年，更早的月份已經結算，不能再補
+function qeMinDate() { return `${addDays(todayKey(), -LOG_KEEP_DAYS).slice(0, 7)}-01`; }
+function qeViewDate() { return qeDate && qeDate < todayKey() ? qeDate : todayKey(); }
+// 補記前幾天的支出：時間用那一天的「現在這個時刻」，讓同一天補的幾筆維持輸入順序
+function qeEntryTime() {
+    const date = qeViewDate();
+    if (date === todayKey()) return Date.now();
+    const now = new Date();
+    const d = new Date(`${date}T00:00`);
+    d.setHours(now.getHours(), now.getMinutes(), now.getSeconds(), now.getMilliseconds());
+    return d.getTime();
+}
+function shiftQuickExpDate(dir) {
+    const next = addDays(qeViewDate(), dir);
+    if (next > todayKey() || next < qeMinDate()) return;
+    playTone('click');
+    qeDate = next === todayKey() ? null : next;
+    document.getElementById('qeMsg').textContent = '';
+    renderQuickExpDate();
+    renderQuickExpToday();
+    updateQuickExpPreview();
+    document.getElementById('qeText').focus();
+}
+function renderQuickExpDate() {
+    const date = qeViewDate(), today = todayKey();
+    const isToday = date === today;
+    document.getElementById('qeTitle').textContent = isToday ? '記一筆支出（今天）'
+        : `${date === addDays(today, -1) ? '昨天' : shortDate(date)} ${weekdayText(date)} 的支出`;
+    document.getElementById('qePrev').disabled = date <= qeMinDate();
+    document.getElementById('qeNext').disabled = isToday;
+    const past = document.getElementById('qePast');
+    past.innerHTML = '';
+    if (!isToday) {
+        past.appendChild(document.createTextNode(`現在記下的會記在 ${shortDate(date)} 那天。`));
+        const back = rewardEl('button', '', '回到今天');
+        back.addEventListener('click', () => { qeDate = null; shiftQuickExpDate(0); });
+        past.appendChild(back);
+    }
+}
 function openQuickExpense() {
     if (!isUnlocked()) return;
+    if (!document.getElementById('quickExpModal').classList.contains('show')) qeDate = null; // 每次打開都從今天開始
     const r = loadRewards();
     const accounts = rewardAccounts(r);
     const hasAcc = accounts.length > 0;
@@ -3823,6 +3864,7 @@ function openQuickExpense() {
     document.getElementById('qeMsg').textContent = hasAcc ? '' : '還沒有帳戶。先到「獎勵」設定帳戶，之後就能在這裡快速記帳。';
     document.getElementById('qeMsg').classList.remove('bad');
     document.getElementById('qeText').value = '';
+    renderQuickExpDate();
     updateQuickExpPreview();
     renderQuickExpToday();
     if (!document.getElementById('quickExpModal').classList.contains('show')) toggleModal(true, 'quickExpModal');
@@ -3840,13 +3882,15 @@ function saveQuickExpense() {
     const r = loadRewards();
     const acc = quickExpAccount(r);
     if (!acc) return;
-    r.expenses.push({ id: newItemId(), at: Date.now(), acc: acc.id, name: p.name, amount: p.amount });
+    const date = qeViewDate();
+    r.expenses.push({ id: newItemId(), at: qeEntryTime(), acc: acc.id, name: p.name, amount: p.amount });
     saveRewards(r);
     prefs.lastExpAcc = acc.id; savePrefs();
     playTone('click');
     const left = accountStats(r)[acc.id].balance;
     msg.classList.toggle('bad', left < 0);
-    msg.textContent = `已記下：${p.name} ${money(p.amount)}，「${acc.name}」${left < 0 ? `透支 ${money(-left)}` : `剩 ${money(left)}`}`;
+    const when = date === todayKey() ? '' : `${shortDate(date)} `;
+    msg.textContent = `已記下：${when}${p.name} ${money(p.amount)}，「${acc.name}」${left < 0 ? `透支 ${money(-left)}` : `剩 ${money(left)}`}`;
     input.value = '';
     updateQuickExpPreview();
     renderQuickExpToday();
@@ -3854,12 +3898,13 @@ function saveQuickExpense() {
     input.focus(); // 可以接著記下一筆
 }
 function renderQuickExpToday() {
-    const r = loadRewards(), today = todayKey();
-    const list = r.expenses.filter(x => dateKey(x.at) === today).sort((a, b) => b.at - a.at);
+    const r = loadRewards(), date = qeViewDate();
+    const list = r.expenses.filter(x => dateKey(x.at) === date).sort((a, b) => b.at - a.at);
     const box = document.getElementById('qeToday');
     box.innerHTML = '';
     const total = list.reduce((sum, x) => sum + x.amount, 0);
-    document.getElementById('qeTodayHead').textContent = list.length ? `今天的支出（${list.length} 筆，共 ${money(total)}）` : '今天還沒有支出';
+    const day = date === todayKey() ? '今天' : '這一天';
+    document.getElementById('qeTodayHead').textContent = list.length ? `${day}的支出（${list.length} 筆，共 ${money(total)}）` : `${day}還沒有支出`;
     list.forEach(x => {
         const row = rewardEl('div', 'qe-row');
         const acc = accById(r, x.acc);
@@ -3874,6 +3919,8 @@ function renderQuickExpToday() {
     });
 }
 document.getElementById('qeSave').addEventListener('click', saveQuickExpense);
+document.getElementById('qePrev').addEventListener('click', () => shiftQuickExpDate(-1));
+document.getElementById('qeNext').addEventListener('click', () => shiftQuickExpDate(1));
 document.getElementById('qeText').addEventListener('input', updateQuickExpPreview);
 document.getElementById('qeText').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveQuickExpense(); } });
 document.getElementById('qeAcc').addEventListener('change', () => { prefs.lastExpAcc = document.getElementById('qeAcc').value; savePrefs(); updateQuickExpPreview(); });
