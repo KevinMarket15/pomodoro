@@ -23,7 +23,10 @@ self.addEventListener('activate', (event) => {
 
 async function networkFirst(request) {
     const cache = await caches.open(SHELL_CACHE);
-    const fromNetwork = fetch(request).then(response => {
+    // 一律向伺服器確認有沒有新版（cache: 'no-cache'），不用瀏覽器暫存的舊檔：
+    // GitHub Pages 讓每個檔案暫存 10 分鐘，剛更新時可能拿到新的頁面配上舊的程式，新功能就會不正常
+    const fresh = request.mode === 'navigate' ? fetch(request.url, { cache: 'no-cache' }) : fetch(request, { cache: 'no-cache' });
+    const fromNetwork = fresh.then(response => {
         if (response.ok) cache.put(request, response.clone());
         return response;
     });
