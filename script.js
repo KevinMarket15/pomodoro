@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.18.1';
+const APP_VERSION = '2026.11.20.1';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -275,6 +275,10 @@ let forcedRev = 0;        // 見 saveTimerState：自動結束時，狀態的版
 const NOTIFY_TAG = 'pomodoro-phase';   // 「時間到」的通知
 const STATUS_TAG = 'pomodoro-status';  // 計時中的常駐通知
 const REMIND_TAG = 'pomodoro-remind';  // 定時提醒的通知（點了只回到網頁，不會開始計時）
+const EXPENSE_TAG = 'pomodoro-expense'; // 每天記帳提醒的通知（點了打開記帳框）
+const ASK_TAG = 'pomodoro-ask';         // 正數太久時問「還在做嗎」的通知
+const ASK_REPEAT_MIN = 30; // 正數問過「還在做嗎」之後，每隔幾分鐘再問一次
+let pickPurpose = null;    // 「現在要做什麼？」視窗開著時的用途，見 openTaskPicker
 
 let keepAliveAudio = null;    // 手機背景保持計時用的靜音音訊，見 updateKeepAlive
 let keepAliveStopTimer = null;
@@ -389,7 +393,11 @@ async function notify(body, tag = NOTIFY_TAG) {
     if (reg && reg.active) { try { await reg.showNotification('蕃茄鐘', options); return; } catch (err) {} }
     try {
         const n = new Notification('蕃茄鐘', options);
-        n.onclick = () => { window.focus(); n.close(); if (tag === NOTIFY_TAG) startFromPrompt(); };
+        n.onclick = () => {
+            window.focus(); n.close();
+            if (tag === NOTIFY_TAG) startFromPrompt();
+            else if (tag === EXPENSE_TAG) openQuickExpense();
+        };
     } catch (err) {}
 }
 async function clearNotifications() {
@@ -524,8 +532,12 @@ function currentTaskName() {
 function updateCurrentTask() {
     const el = document.getElementById('currentTask');
     const task = currentTaskName();
+    const pickable = mode === 'focus' && (!!session || !task);
+    el.classList.toggle('pickable', pickable);
+    el.title = pickable ? '點一下選擇或更換這一段要做的任務' : '';
     if (mode !== 'focus') el.textContent = '☕ 休息時間';
-    else el.textContent = task ? `▶ ${task}` : '凹槽第一個任務 = 目前任務';
+    else if (task) el.textContent = `▶ ${task}`;
+    else el.textContent = session ? '▶ 未指定任務（點這裡選）' : '任務條沒有任務也可以直接開始';
     // 標出行程裡的目前任務（第一張還沒完成的）
     const cards = [...document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder)')];
     const current = cards.find(c => !c.classList.contains('done'));
@@ -629,7 +641,7 @@ function getElapsed() { return Math.max(0, Math.floor((Date.now() - countStart) 
 function tick() {
     if (!isRunning) return;
     if (Date.now() - lastTimesRefresh > 30000) refreshScheduleTimes();
-    if (isCountUp()) { elapsed = getElapsed(); updateDisplay(); return; } // 正數沒有終點，按「結束」才結算
+    if (isCountUp()) { elapsed = getElapsed(); updateDisplay(); checkCountUpAsk(); return; } // 正數沒有終點，按「結束」才結算
     timeLeft = getRemaining();
     updateDisplay();
     if (timeLeft <= 0) finishPhase();
@@ -642,12 +654,15 @@ function scheduleTicks() {
     finishTimer = setTimeout(tick, Math.max(0, endTime - Date.now()) + 50);   // 單次計時器較不受背景降頻影響，讓鈴聲準時
 }
 
-function startTimer() {
+// opts.task：指定這一段要做的任務（不用先排進任務條）；任務條上有同名、還沒完成的卡就推進那張的進度
+function startTimer(opts) {
     const countUp = isCountUp();
     if (!countUp && timeLeft <= 0) timeLeft = timerSettings[mode];
     if (!session) {
-        const card = mode === 'focus' ? getCurrentCard() : null;
-        session = { mode, task: mode === 'focus' ? getCurrentTask() : '', cardId: card ? card.dataset.id : null, start: Date.now(),
+        const picked = !!opts && typeof opts.task === 'string';
+        const card = mode === 'focus' ? (picked ? cardNamed(opts.task) : getCurrentCard()) : null;
+        const task = mode === 'focus' ? (picked ? opts.task : getCurrentTask()) : '';
+        session = { mode, task, cardId: card ? card.dataset.id : null, start: Date.now(),
                     plannedSec: countUp ? 0 : timeLeft, activeMs: 0, countUp };
     }
     session.segStart = Date.now();
@@ -716,9 +731,16 @@ function setCountUp(countUp) {
     saveTimerState();
 }
 
-// 正數按「結束」：專注每滿一段專注時長算一顆蕃茄，然後切到下一段
-function finishCountUp() {
+// 正數按「結束」：專注每滿一段專注時長算一顆蕃茄，然後切到下一段。
+// endAt：忘了按結束時，實際做完的時間（只能改到最後一次開始／繼續計時之後）
+function finishCountUp(endAt) {
     stopTimer();
+    if (Number.isFinite(endAt) && session && session.lastActive && endAt < session.lastActive) {
+        const end = Math.max(endAt, session.segStart || session.start);
+        session.activeMs = Math.max(0, session.activeMs - (session.lastActive - end));
+        session.lastActive = end;
+    }
+    const untagged = untaggedFocusStart();
     const before = getTodayCount();
     const cardId = session && session.cardId, sessionStart = session && session.start;
     if (mode === 'focus' && session) {
@@ -736,6 +758,7 @@ function finishCountUp() {
     switchMode(next);
     const gain = rewardStart ? rewardGainText(rewardStart) : '';
     if (gain) { playTone('alarm'); showToast(`專注結束！${gain}`, null, null, 6000); }
+    askTaskForLog(untagged);
     autoDriveSave(false);
 }
 
@@ -754,6 +777,7 @@ function finishPhase() {
     const auto = !!timerSettings.autoStart;
     forcedRev = endTime || Date.now();
     let rewardStart = null; // 完成前的點數，用來算這顆賺了多少
+    const untagged = untaggedFocusStart();
     try {
         const before = getTodayCount();
         if (finished === 'focus') rewardStart = rewardSummary();
@@ -768,6 +792,7 @@ function finishPhase() {
     announce(finished === 'focus'
         ? `專注結束！${gain ? gain + ' ' : ''}接下來是${MODE_LABELS[mode]}（${formatTime(timerSettings[mode])}）`
         : (auto ? '休息結束，下一顆蕃茄開始了！' : '休息結束，準備開始下一顆蕃茄！'), auto);
+    askTaskForLog(untagged);
     autoDriveSave(false);
 }
 
@@ -807,6 +832,7 @@ timeDisplay.addEventListener('blur', () => {
 startBtn.addEventListener('click', () => {
     playTone('click');
     requestNotifyPermission(); // 第一次按開始時詢問是否允許通知（瀏覽器規定要由點擊觸發）
+    if (!isRunning && !session && mode === 'focus' && !getCurrentTask()) { openTaskPicker('start'); return; }
     toggleTimer();
 });
 function toggleTimer() {
@@ -822,7 +848,9 @@ document.getElementById('resetBtn').addEventListener('click', () => {
 });
 document.getElementById('skipBtn').addEventListener('click', () => {
     playTone('click');
-    if (isCountUp()) finishCountUp(); else advancePhase(false);
+    if (!isCountUp()) advancePhase(false);
+    else if (needEndTimeAsk()) openEndTime(); // 計時很久了：先問實際是幾點結束的
+    else finishCountUp();
 });
 document.querySelectorAll('.mode-btn').forEach(btn => btn.addEventListener('click', () => {
     playTone('click'); switchMode(btn.dataset.mode);
@@ -856,7 +884,8 @@ if ('serviceWorker' in navigator) {
         if (!e.data || e.data.type !== 'notification-click') return;
         // 點常駐通知只是回到網頁（系統會把通知收掉，這裡補發一則）；點「時間到」的通知才開始下一段
         if (e.data.tag === STATUS_TAG) { statusSig = ''; updateStatusNotification(); }
-        else if (e.data.tag === REMIND_TAG) { /* 定時提醒：回到網頁就好，提示列上有「開始」 */ }
+        else if (e.data.tag === REMIND_TAG || e.data.tag === ASK_TAG) { /* 回到網頁就好，提示列上有按鈕 */ }
+        else if (e.data.tag === EXPENSE_TAG) openQuickExpense();
         else startFromPrompt();
     });
     if (location.protocol !== 'file:') navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -2129,6 +2158,11 @@ function renderSettings() {
     document.getElementById('setAutoStart').checked = !!timerSettings.autoStart;
     document.getElementById('setStatusNotify').checked = !!prefs.statusNotify;
     document.getElementById('setBgAudio').checked = !!prefs.bgAudio;
+    const et = expRemindTime();
+    document.getElementById('setExpRemind').checked = !!et;
+    document.getElementById('setExpTime').value = et || '21:00';
+    document.getElementById('setExpTimeRow').style.display = et ? '' : 'none';
+    document.getElementById('setAskMin').value = askMinutes();
 }
 // 主題換了之後，懸浮小視窗也要跟著換
 function refreshThemeDependents() {
@@ -3045,6 +3079,7 @@ function addFundExpense() {
     if (!acc) return;
     r.expenses.push({ id: newItemId(), at: Date.now(), acc: acc.id, name: nameEl.value.trim().slice(0, 100) || '支出', amount });
     saveRewards(r);
+    prefs.lastExpAcc = acc.id; savePrefs();
     playTone('click');
     nameEl.value = ''; amountEl.value = '';
     const left = accountStats(r)[acc.id].balance;
@@ -3491,6 +3526,7 @@ function checkReminders() {
         if (now - at > 3 * 3600 * 1000) return; // 超過 3 小時才打開網頁的，就不補提醒了
         fireReminder(rem, at);
     });
+    checkExpenseReminder(now, today, fired);
     renderReminders();
 }
 function fireReminder(rem, at) {
@@ -3633,7 +3669,7 @@ function calendarUrl(rem) {
         action: 'TEMPLATE',
         text: rem.name + (rem.next ? `，接著${rem.next}` : ''),
         dates: `${fmt(start)}/${fmt(start + 15 * 60 * 1000)}`,
-        details: '由蕃茄鐘建立的提醒'
+        details: rem.details || '由蕃茄鐘建立的提醒'
     });
     try { params.set('ctz', Intl.DateTimeFormat().resolvedOptions().timeZone); } catch (err) {}
     if (rem.days.length) {
@@ -3755,6 +3791,321 @@ document.getElementById('doneToggle').addEventListener('click', () => {
     updateDoneToggle();
 });
 
+/* --- 快速記帳：一格打完金額和用途（例如「120 午餐」），帳戶用上次選的 --- */
+// 從文字裡找出金額與用途。有好幾個數字時取最大的（例如「7-11 咖啡 45」是 45 元）
+function parseExpense(text) {
+    const t = String(text || '').trim();
+    const nums = [...t.matchAll(/\d[\d,]*(?:\.\d+)?/g)];
+    if (!nums.length) return null;
+    const pick = nums.reduce((a, b) => (Number(b[0].replace(/,/g, '')) > Number(a[0].replace(/,/g, '')) ? b : a));
+    const amount = Math.round(Number(pick[0].replace(/,/g, '')));
+    if (!(amount >= 1 && amount <= 1e9)) return null;
+    const name = (t.slice(0, pick.index) + ' ' + t.slice(pick.index + pick[0].length))
+        .replace(/NT\$|\$|元|塊/gi, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+    return { amount, name: name || '支出' };
+}
+function quickExpAccount(r) {
+    const accounts = rewardAccounts(r);
+    return accById(r, document.getElementById('qeAcc').value) || accById(r, prefs.lastExpAcc) || accounts[0] || null;
+}
+function openQuickExpense() {
+    if (!isUnlocked()) return;
+    const r = loadRewards();
+    const accounts = rewardAccounts(r);
+    const hasAcc = accounts.length > 0;
+    document.getElementById('qeForm').style.display = hasAcc ? '' : 'none';
+    document.getElementById('qeNoAcc').style.display = hasAcc ? 'none' : '';
+    const sel = document.getElementById('qeAcc');
+    sel.innerHTML = '';
+    accounts.forEach(a => { const o = document.createElement('option'); o.value = a.id; o.textContent = a.name; sel.appendChild(o); });
+    const last = accById(r, prefs.lastExpAcc);
+    if (last) sel.value = last.id;
+    document.getElementById('qeMsg').textContent = hasAcc ? '' : '還沒有帳戶。先到「獎勵」設定帳戶，之後就能在這裡快速記帳。';
+    document.getElementById('qeMsg').classList.remove('bad');
+    document.getElementById('qeText').value = '';
+    updateQuickExpPreview();
+    renderQuickExpToday();
+    if (!document.getElementById('quickExpModal').classList.contains('show')) toggleModal(true, 'quickExpModal');
+    if (hasAcc) setTimeout(() => document.getElementById('qeText').focus(), 50);
+}
+function updateQuickExpPreview() {
+    const p = parseExpense(document.getElementById('qeText').value);
+    const acc = quickExpAccount(loadRewards());
+    document.getElementById('qePreview').textContent = p && acc ? `→ ${p.name} ${money(p.amount)}（從「${acc.name}」）` : '';
+}
+function saveQuickExpense() {
+    const input = document.getElementById('qeText'), msg = document.getElementById('qeMsg');
+    const p = parseExpense(input.value);
+    if (!p) { msg.textContent = '請輸入金額，例如：120 午餐'; msg.classList.add('bad'); input.focus(); return; }
+    const r = loadRewards();
+    const acc = quickExpAccount(r);
+    if (!acc) return;
+    r.expenses.push({ id: newItemId(), at: Date.now(), acc: acc.id, name: p.name, amount: p.amount });
+    saveRewards(r);
+    prefs.lastExpAcc = acc.id; savePrefs();
+    playTone('click');
+    const left = accountStats(r)[acc.id].balance;
+    msg.classList.toggle('bad', left < 0);
+    msg.textContent = `已記下：${p.name} ${money(p.amount)}，「${acc.name}」${left < 0 ? `透支 ${money(-left)}` : `剩 ${money(left)}`}`;
+    input.value = '';
+    updateQuickExpPreview();
+    renderQuickExpToday();
+    updateRewardBadge();
+    input.focus(); // 可以接著記下一筆
+}
+function renderQuickExpToday() {
+    const r = loadRewards(), today = todayKey();
+    const list = r.expenses.filter(x => dateKey(x.at) === today).sort((a, b) => b.at - a.at);
+    const box = document.getElementById('qeToday');
+    box.innerHTML = '';
+    const total = list.reduce((sum, x) => sum + x.amount, 0);
+    document.getElementById('qeTodayHead').textContent = list.length ? `今天的支出（${list.length} 筆，共 ${money(total)}）` : '今天還沒有支出';
+    list.forEach(x => {
+        const row = rewardEl('div', 'qe-row');
+        const acc = accById(r, x.acc);
+        row.appendChild(rewardEl('span', 'qe-time', clockText(x.at)));
+        row.appendChild(rewardEl('span', 'qe-name', x.name + (acc ? `（${acc.name}）` : '')));
+        row.appendChild(rewardEl('span', 'qe-amount', money(x.amount)));
+        const del = rewardEl('button', 'qe-del', '✕');
+        del.title = '刪除這一筆';
+        del.addEventListener('click', () => { cancelRewardEntry('expenses', x.id); renderQuickExpToday(); });
+        row.appendChild(del);
+        box.appendChild(row);
+    });
+}
+document.getElementById('qeSave').addEventListener('click', saveQuickExpense);
+document.getElementById('qeText').addEventListener('input', updateQuickExpPreview);
+document.getElementById('qeText').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); saveQuickExpense(); } });
+document.getElementById('qeAcc').addEventListener('change', () => { prefs.lastExpAcc = document.getElementById('qeAcc').value; savePrefs(); updateQuickExpPreview(); });
+document.getElementById('qeNoAcc').addEventListener('click', () => { toggleModal(false, 'quickExpModal'); openRewards(); });
+
+/* --- 每天記帳提醒：設定存在時長設定（會同步），''＝關閉，沒設定過＝預設 21:00 --- */
+function expRemindTime() {
+    if (timerSettings.expRemind === '') return null;
+    return cleanTime(timerSettings.expRemind) || '21:00';
+}
+function checkExpenseReminder(now, today, fired) {
+    const time = expRemindTime();
+    if (!time || fired.__expense === today) return;
+    if (!rewardAccounts(loadRewards()).length) return; // 沒有在記帳就不提醒
+    const at = new Date(`${today}T${time}`).getTime();
+    if (now < at) return;
+    markFired('__expense');
+    if (now - at > 3 * 3600 * 1000) return;
+    const n = loadRewards().expenses.filter(x => dateKey(x.at) === today).length;
+    const msg = n ? `💸 今天記了 ${n} 筆支出，還有漏記的嗎？` : '💸 今天有花錢嗎？記一下吧';
+    playTone('alarm');
+    setTimeout(() => playTone('alarm'), 700);
+    showToast(msg, '記帳', openQuickExpense, 30 * 60 * 1000);
+    if (document.hidden || !document.hasFocus()) { startAttention(); notify(msg, EXPENSE_TAG); }
+}
+// 改了提醒時間：今天已經響過、但新的時間還沒到，就讓它再響一次
+function resetExpenseFired() {
+    const time = expRemindTime(), f = readFired();
+    if (time && f.__expense && new Date(`${todayKey()}T${time}`).getTime() > Date.now()) {
+        delete f.__expense; localStorage.setItem(REMIND_FIRED_KEY, JSON.stringify(f));
+    }
+}
+function quickLink(action) { return `${location.origin}${location.pathname}?do=${action}`; }
+document.getElementById('setExpRemind').addEventListener('change', (e) => {
+    timerSettings.expRemind = e.target.checked ? (cleanTime(document.getElementById('setExpTime').value) || '21:00') : '';
+    saveTimerSettings(); resetExpenseFired(); renderSettings();
+    if (e.target.checked) requestNotifyPermission();
+});
+document.getElementById('setExpTime').addEventListener('change', (e) => {
+    const t = cleanTime(e.target.value);
+    if (!t) return;
+    timerSettings.expRemind = t; saveTimerSettings(); resetExpenseFired();
+});
+document.getElementById('setExpCal').addEventListener('click', () => {
+    playTone('click');
+    const rem = { name: '記帳：今天有花錢嗎？', time: expRemindTime() || '21:00', days: [0, 1, 2, 3, 4, 5, 6],
+                  details: `打開記帳：${quickLink('expense')}` };
+    window.open(calendarUrl(rem), '_blank', 'noopener');
+});
+document.getElementById('setAskMin').addEventListener('change', (e) => {
+    timerSettings.askMin = cleanInt(e.target.value, 0, 600, 90);
+    e.target.value = timerSettings.askMin;
+    saveTimerSettings();
+});
+document.querySelectorAll('[data-copy-link]').forEach(btn => btn.addEventListener('click', async () => {
+    const url = quickLink(btn.dataset.copyLink);
+    try { await navigator.clipboard.writeText(url); showToast('已複製連結，可以加成書籤或貼到別的地方', null, null, 4000); }
+    catch (err) { prompt('複製這個連結：', url); }
+}));
+
+/* --- 不排任務就開始：任務條沒有任務時，按開始先問「現在要做什麼？」 ---
+ * purpose：'start'（開始新的一段）、'session'（更換正在進行這一段的任務）、{ logStart }（結束後補選剛剛那段的任務） */
+function cardNamed(name) {
+    return [...document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder):not(.done)')]
+        .find(c => c.querySelector('.task-name').innerText === name) || null;
+}
+// 最近做過的任務（新的在前），不夠的話用任務庫補
+function recentTaskNames(limit = 8) {
+    const names = [];
+    loadLogs().filter(l => l.mode === 'focus' && l.task).sort((a, b) => b.start - a.start)
+        .forEach(l => { if (names.length < limit && !names.includes(l.task)) names.push(l.task); });
+    cleanCategories(readStoredJSON(STORAGE_KEY_CATS) || []).forEach(c => c.tasks.forEach(t => {
+        if (names.length < limit && !names.includes(t)) names.push(t);
+    }));
+    return names;
+}
+function openTaskPicker(purpose) {
+    pickPurpose = purpose;
+    fillTaskDatalist();
+    const forLog = purpose && typeof purpose === 'object';
+    document.getElementById('ptTitle').textContent = forLog ? '剛剛這段專注做了什麼？' : (purpose === 'session' ? '這一段在做什麼？' : '現在要做什麼？');
+    document.getElementById('ptGo').textContent = purpose === 'start' ? '開始' : '確定';
+    document.getElementById('ptSkip').textContent = purpose === 'start' ? '先開始，之後再選' : (forLog ? '不用了' : '不指定');
+    document.getElementById('ptNote').textContent = purpose === 'start'
+        ? '只記在時間記錄，不會加進任務條；任務條上有同名、還沒完成的任務，一樣會推進它的進度。'
+        : (forLog ? '選了之後，這段專注會記在這個任務底下（點數也照它的類別算）。' : '');
+    const input = document.getElementById('ptName');
+    input.value = purpose === 'session' && session ? session.task : '';
+    const box = document.getElementById('ptRecent');
+    box.innerHTML = '';
+    recentTaskNames().forEach(name => {
+        const chip = rewardEl('button', 'pt-chip', name);
+        chip.addEventListener('click', () => choosePickedTask(name));
+        box.appendChild(chip);
+    });
+    if (!document.getElementById('pickTaskModal').classList.contains('show')) toggleModal(true, 'pickTaskModal');
+    setTimeout(() => input.focus(), 50);
+}
+function choosePickedTask(name) {
+    const purpose = pickPurpose;
+    pickPurpose = null;
+    toggleModal(false, 'pickTaskModal');
+    name = cleanText(String(name || '').trim(), 100);
+    if (purpose === 'start') {
+        if (!isRunning && !session) startTimer({ task: name });
+    } else if (purpose === 'session') {
+        if (!session || session.mode !== 'focus') return;
+        session.task = name;
+        const card = name ? cardNamed(name) : null;
+        session.cardId = card ? card.dataset.id : null;
+        saveTimerState(); updateCurrentTask();
+    } else if (purpose && typeof purpose === 'object' && name) {
+        assignLogTask(purpose.logStart, name);
+    }
+}
+// 這一段是沒有指定任務的專注：回傳開始時間（結束後用來找那筆記錄）
+function untaggedFocusStart() { return session && session.mode === 'focus' && !session.task ? session.start : null; }
+// 沒指定任務的專注結束後，問剛剛做了什麼（記錄太短沒寫入的就不問）
+function askTaskForLog(start) {
+    if (start === null || !loadLogs().some(l => l.mode === 'focus' && l.start === start)) return;
+    openTaskPicker({ logStart: start });
+}
+function assignLogTask(start, name) {
+    const logs = loadLogs();
+    const target = logs.find(l => l.mode === 'focus' && l.start === start);
+    if (!target) return;
+    target.task = name;
+    // 和修改記錄一樣：換一個編號，其他裝置才會收下新的內容
+    let next = target.start + 1;
+    while (logs.some(x => x !== target && x.mode === target.mode && x.start === next)) next++;
+    target.start = next;
+    saveLogs(logs);
+    rerenderKey(STORAGE_KEY_LOG);
+    updateRewardBadge();
+    const card = dateKey(target.end) === todayKey() ? cardNamed(name) : null;
+    if (card) creditCard(card.dataset.id, pomodorosOf(target), `a${start}`);
+}
+document.getElementById('ptGo').addEventListener('click', () => { playTone('click'); choosePickedTask(document.getElementById('ptName').value); });
+document.getElementById('ptName').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); choosePickedTask(e.target.value); }
+});
+document.getElementById('ptSkip').addEventListener('click', () => {
+    playTone('click');
+    const purpose = pickPurpose;
+    if (purpose === 'start') { choosePickedTask(''); return; }
+    if (purpose === 'session') { choosePickedTask(''); return; }
+    pickPurpose = null; toggleModal(false, 'pickTaskModal');
+});
+document.getElementById('currentTask').addEventListener('click', () => {
+    if (mode !== 'focus') return;
+    if (session && session.mode === 'focus') { playTone('click'); openTaskPicker('session'); }
+    else if (!session && !getCurrentTask()) { playTone('click'); openTaskPicker('start'); }
+});
+
+/* --- 正數忘了按結束：計時太久時問「還在做嗎」，結束時可以改成實際結束的時間 --- */
+function askMinutes() { return cleanInt(timerSettings.askMin, 0, 600, 90); } // 0＝不問
+function liveActiveSec() { return session ? Math.round((session.activeMs + (isRunning ? Date.now() - session.segStart : 0)) / 1000) : 0; }
+function needEndTimeAsk() { const m = askMinutes(); return !!(m && isRunning && session && liveActiveSec() >= m * 60); }
+function durationText(sec) {
+    const min = Math.round(sec / 60);
+    return min >= 60 ? `${Math.floor(min / 60)} 小時${min % 60 ? ` ${min % 60} 分` : ''}` : `${min} 分鐘`;
+}
+function checkCountUpAsk() {
+    const first = askMinutes();
+    if (!first || !session || !isRunning || !session.countUp) return;
+    const min = Math.floor(liveActiveSec() / 60);
+    if (min < first) return;
+    const step = Math.floor((min - first) / ASK_REPEAT_MIN);
+    if (session.asked != null && session.asked >= step) return;
+    session.asked = step;
+    saveTimerState();
+    const focus = session.mode === 'focus';
+    const msg = `⏱ 已經${focus ? '專注' : '休息'} ${durationText(liveActiveSec())}了，還在${focus ? '做' : '休息'}嗎？`;
+    playTone('alarm');
+    setTimeout(() => playTone('alarm'), 700);
+    showToast(msg, '其實已經結束了', openEndTime, 10 * 60 * 1000);
+    if (document.hidden || !document.hasFocus()) { startAttention(); notify(msg, ASK_TAG); }
+}
+function openEndTime() {
+    if (!isCountUp() || !session || !isRunning) { if (isCountUp() && session) finishCountUp(); return; }
+    const from = session.segStart || session.start;
+    const resumed = from > session.start + 1000;
+    document.getElementById('etNote').textContent =
+        `已經計時 ${durationText(liveActiveSec())}（${clockText(session.start)} 開始）。如果早就做完了，改成實際結束的時間，記錄就不會多算。` +
+        (resumed ? `中間暫停過，最早只能改到 ${clockText(from)}（最後一次按繼續的時間）。` : '');
+    document.getElementById('etTime').value = clockText(Date.now());
+    document.getElementById('etMsg').textContent = '';
+    toggleModal(true, 'endTimeModal');
+}
+function saveEndTime(useNow) {
+    if (!session || !isRunning) { toggleModal(false, 'endTimeModal'); return; }
+    let endAt = Date.now();
+    if (!useNow) {
+        const t = cleanTime(document.getElementById('etTime').value);
+        const msg = document.getElementById('etMsg');
+        if (!t) { msg.textContent = '請選擇時間'; return; }
+        endAt = new Date(`${todayKey()}T${t}`).getTime();
+        if (endAt > Date.now()) endAt -= 24 * 3600 * 1000; // 選的時間比現在晚：是昨天的那個時間（跨過午夜）
+        const from = session.segStart || session.start;
+        if (endAt < from - 60000) { msg.textContent = `不能早於 ${clockText(from)}`; return; }
+        endAt = Math.max(endAt, from);
+    }
+    toggleModal(false, 'endTimeModal');
+    finishCountUp(useNow ? undefined : endAt);
+}
+document.getElementById('etNow').addEventListener('click', () => { playTone('click'); saveEndTime(true); });
+document.getElementById('etSave').addEventListener('click', () => { playTone('click'); saveEndTime(false); });
+
+/* --- 從捷徑開啟：網址帶 ?do=expense（記帳）或 ?do=focus（開始專注） --- */
+function whenUnlocked(fn) {
+    if (isUnlocked()) { fn(); return; }
+    const obs = new MutationObserver(() => { if (isUnlocked()) { obs.disconnect(); fn(); } });
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+}
+function handleLaunchAction() {
+    const params = new URLSearchParams(location.search);
+    const act = params.get('do');
+    if (!act) return;
+    params.delete('do'); // 重新整理時不要再做一次
+    const qs = params.toString();
+    try { history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : '') + location.hash); } catch (err) {}
+    whenUnlocked(() => setTimeout(() => { // 稍等一下，讓同步先帶進別台裝置的計時狀態
+        if (act === 'expense') openQuickExpense();
+        else if (act === 'focus' && !isRunning) {
+            if (session) return; // 有暫停中的一段：讓使用者自己決定要不要繼續
+            if (mode !== 'focus') switchMode('focus');
+            openTaskPicker('start');
+            document.getElementById('ptName').value = getCurrentTask();
+        }
+    }, 800));
+}
+
 /* --- 8. 給同步模組 (sync.js) 用的介面 --- */
 window.pomodoroApp = {
     keys: { categories: STORAGE_KEY_CATS, schedule: STORAGE_KEY_SCHED, timer: STORAGE_KEY_TIMER, state: STORAGE_KEY_STATE, logs: STORAGE_KEY_LOG, rewards: STORAGE_KEY_REWARDS, reminders: STORAGE_KEY_REMIND, done: STORAGE_KEY_DONE },
@@ -3816,6 +4167,7 @@ const ACTIONS = {
     'open-stats': () => openStatsModal(),
     'open-ai': () => openAiModal(),
     'open-rewards': () => openRewards(),
+    'open-expense': () => openQuickExpense(),
     'stats-prev': () => shiftStats(-1),
     'stats-next': () => shiftStats(1),
     'open-sync': () => toggleModal(true, 'syncModal'),
@@ -3865,6 +4217,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (prefs.lastVersion && prefs.lastVersion !== APP_VERSION) showToast(`已更新到版本 ${APP_VERSION}`, null, null, 6000);
     if (prefs.lastVersion !== APP_VERSION) { prefs.lastVersion = APP_VERSION; savePrefs(); }
     renderReminders();
+    handleLaunchAction();
     setInterval(checkReminders, 15000);
     setTimeout(checkReminders, 3000); // 等同步把別台裝置的提醒帶進來
     document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReminders(); });

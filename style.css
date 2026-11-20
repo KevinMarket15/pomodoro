@@ -512,6 +512,20 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
     padding: 4px 10px; font-size: 0.85rem; color: var(--muted); cursor: pointer; font-variant-numeric: tabular-nums;
 }
 .points-btn:active { box-shadow: var(--inner-shadow); }
+/* 快速記帳、選任務、結束時間 */
+.current-task.pickable { cursor: pointer; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.qe-preview { display: block; min-height: 1.2em; margin-top: 6px; font-size: 0.85rem; }
+.qe-row { display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 8px; font-size: 0.85rem; padding: 4px 0; }
+.qe-time { color: var(--faint); font-variant-numeric: tabular-nums; }
+.qe-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.qe-amount { color: var(--muted); font-variant-numeric: tabular-nums; }
+.qe-del { border: none; background: transparent; color: var(--faint); cursor: pointer; padding: 2px 6px; }
+.qe-del:hover { color: #e17055; }
+.pt-recent { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+.pt-chip { border: none; background: var(--bg-color); box-shadow: var(--small-outer); border-radius: 14px; padding: 6px 12px; font: inherit; font-size: 0.85rem; color: var(--text-color); cursor: pointer; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pt-chip:active { box-shadow: var(--inner-shadow); }
+.link-btn { text-decoration: none; text-align: center; display: inline-flex; align-items: center; justify-content: center; }
+.small-btn { display: block; width: 100%; margin: 10px 0 6px; padding: 9px 12px; font-size: 0.85rem; }
 .rw-level { margin-bottom: 6px; }
 .rw-level-head { display: flex; justify-content: space-between; align-items: baseline; font-weight: bold; margin-bottom: 6px; }
 .rw-balance { font-size: 1.3rem; color: #e1a500; font-variant-numeric: tabular-nums; }

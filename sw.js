@@ -72,6 +72,6 @@ self.addEventListener('notificationclick', (event) => {
                 return;
             } catch (err) { /* 這個叫不到前面，試下一個 */ }
         }
-        await self.clients.openWindow('./?app=1');
+        await self.clients.openWindow(tag === 'pomodoro-expense' ? './?app=1&do=expense' : './?app=1');
     })());
 });
