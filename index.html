@@ -36,10 +36,21 @@
         <button class="help-fab" data-action="open-stats" title="每週統計"><span class="fab-icon">📊</span><span class="fab-label">每週統計</span></button>
         <button class="help-fab" data-action="open-rewards" title="獎勵"><span class="fab-icon">🎁</span><span class="fab-label">獎勵</span></button>
         <button class="help-fab" data-action="open-expense" title="記一筆支出"><span class="fab-icon">💸</span><span class="fab-label">記帳</span></button>
+        <button class="help-fab" data-action="open-secretary" title="秘書"><span class="fab-icon">💬</span><span class="fab-label">秘書</span></button>
         <button class="help-fab" data-action="open-ai" title="AI 助理"><span class="fab-icon">🤖</span><span class="fab-label">AI 助理</span></button>
         <button class="help-fab float-fab" data-action="open-float" title="懸浮小視窗"><span class="fab-icon">⧉</span><span class="fab-label">懸浮小視窗</span></button>
         <button class="help-fab sync-fab" id="syncFab" data-action="open-sync" title="雲端同步" style="display:none" data-state="off"><span class="fab-icon">☁</span><span class="fab-label">雲端同步</span><span class="sync-dot"></span></button>
     </div>
+</div>
+
+<!-- 秘書的對話泡泡（畫面下方） -->
+<div class="sec-bubble" id="secBubble" role="status" aria-live="polite">
+    <div class="sec-avatar" aria-hidden="true">🍅</div>
+    <div class="sec-body">
+        <div class="sec-text" id="secText"></div>
+        <div class="sec-actions" id="secActions"></div>
+    </div>
+    <button class="sec-close" id="secClose" title="關閉（過一陣子再問）">×</button>
 </div>
 
 <div class="toast" id="toast" role="status" aria-live="polite">
@@ -406,6 +417,68 @@
     </div>
 </div>
 
+<div class="modal-overlay" id="secModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title">💬 秘書</div>
+            <label class="setting-row">
+                <span class="setting-label">啟用秘書<small>主動關心你、幫你決定現在做什麼</small></span>
+                <input type="checkbox" class="switch" id="secOn">
+            </label>
+            <div id="secBody">
+                <div class="setting-row setting-col">
+                    <span class="setting-label">什麼時候可以來找我</span>
+                    <div class="seg" id="secWhen">
+                        <button class="seg-btn" data-v="hours">設定的時段</button>
+                        <button class="seg-btn" data-v="always">網頁開著就可以</button>
+                        <button class="seg-btn" data-v="open">只有打開網頁時</button>
+                    </div>
+                    <div class="setting-note top" id="secWhenNote"></div>
+                </div>
+                <div id="secHoursBox">
+                    <div id="secRanges"></div>
+                    <button class="clear-btn log-btn" id="secAddRange">＋ 新增時段</button>
+                    <div class="seg day-seg" id="secDays">
+                        <button class="seg-btn" data-day="1">一</button>
+                        <button class="seg-btn" data-day="2">二</button>
+                        <button class="seg-btn" data-day="3">三</button>
+                        <button class="seg-btn" data-day="4">四</button>
+                        <button class="seg-btn" data-day="5">五</button>
+                        <button class="seg-btn" data-day="6">六</button>
+                        <button class="seg-btn" data-day="0">日</button>
+                    </div>
+                </div>
+                <div class="setting-row">
+                    <span class="setting-label">沒在計時多久來問我（分鐘）<small>按「我在休息」或關掉泡泡，也是隔這麼久再問</small></span>
+                    <input type="number" class="text-input rw-num" id="secIdle" min="5" max="600" step="5" inputmode="numeric" aria-label="多久來問">
+                </div>
+                <div class="setting-row setting-col">
+                    <span class="setting-label">說話的語氣</span>
+                    <div class="seg" id="secTone">
+                        <button class="seg-btn" data-v="gentle">溫柔鼓勵</button>
+                        <button class="seg-btn" data-v="coach">活潑教練</button>
+                        <button class="seg-btn" data-v="brief">簡短直接</button>
+                    </div>
+                </div>
+                <label class="setting-row">
+                    <span class="setting-label">念出來（這台裝置）<small>用瀏覽器內建的語音，音量跟著提示音</small></span>
+                    <input type="checkbox" class="switch" id="secVoice">
+                </label>
+                <div class="setting-row">
+                    <span class="setting-label">晚上回顧今天<small>時間到說說今天做了多少</small></span>
+                    <input type="time" class="text-input rw-num" id="secReview" aria-label="回顧時間">
+                    <input type="checkbox" class="switch" id="secReviewOn" aria-label="開啟晚上回顧">
+                </div>
+                <div class="data-actions">
+                    <button class="action-btn export" id="secTry">現在試試看</button>
+                </div>
+            </div>
+            <div class="setting-note">秘書會從任務條、今天的固定任務、最近做過的任務裡挑一件建議你，按「▶ 開始」就開始計時；沒力氣時按「只做 5 分鐘」，5 分鐘到會問你要不要繼續，停下來也會記在時間記錄。網頁要開著才會說話：手機網頁在背景會被暫停，回到網頁時才會出現。</div>
+        </div>
+    </div>
+</div>
+
 <div class="modal-overlay" id="quickExpModal">
     <div class="modal-content">
         <button class="modal-close">×</button>
@@ -565,6 +638,7 @@
                 <li><strong>排序類別：</strong>按住類別標題右側的 ☰ 圖示上下拖曳。</li>
                 <li><strong>目前任務：</strong>凹槽最上面的任務就是目前任務（以按下開始時為準）。要換任務，把它拖到最上面。</li>
                 <li><strong>時間記錄：</strong>每段專注與休息結束後會自動記錄時間、任務與實際時長（中途結束的標示「中斷」），保留一年。按凹槽下方「時間記錄」查看，用 ‹ › 切換到過去有記錄的日子；可匯出當天的 CSV（試算表）或 Markdown（筆記），或一次匯出全部記錄的 CSV。</li>
+                <li><strong>秘書：</strong>右上角 💬。打開網頁、休息結束或一陣子沒計時，秘書會建議你現在做什麼，按「▶ 開始」就開始；沒力氣時按「只做 5 分鐘」。做完會鼓勵你，晚上會回顧今天。什麼時段可以來問、語氣、要不要念出來，都在 💬 裡設定。</li>
                 <li><strong>快速記帳：</strong>按計時器下方的「💸 記帳」（或右上角選單），在同一格打「120 午餐」按記下就好，帳戶會用上次選的。每天晚上 9 點會提醒你記帳（⚙ 設定裡可以改時間或關掉）。</li>
                 <li><strong>沒排任務也能開始：</strong>任務條沒有任務時按開始，會問「現在要做什麼？」，打字或點最近做過的任務就開始；也可以先開始、結束後再選。計時中點計時器下方的任務名稱可以更換。這樣開始的任務只記在時間記錄，不會加進任務條。</li>
                 <li><strong>忘了按結束：</strong>正數計時超過 90 分鐘（⚙ 設定可改）會問你還在做嗎；按結束時可以改成實際結束的時間，記錄就不會多算。</li>

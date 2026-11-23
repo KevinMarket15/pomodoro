@@ -336,6 +336,27 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
 }
 .toast-close { border: none; background: transparent; color: var(--faint); font-size: 1.3rem; cursor: pointer; flex-shrink: 0; line-height: 1; }
 
+/* --- 秘書的對話泡泡 --- */
+.sec-bubble {
+    position: fixed; left: 50%; bottom: 16px; transform: translate(-50%, 160%); z-index: 2900;
+    display: flex; align-items: flex-start; gap: 12px;
+    width: min(480px, calc(100vw - 32px)); padding: 14px 14px 14px 16px; border-radius: 20px;
+    background: var(--bg-color); color: var(--text-color);
+    box-shadow: var(--outer-shadow), 0 0 0 2px var(--accent-color);
+    transition: transform 0.3s ease; visibility: hidden;
+}
+.sec-bubble.show { transform: translate(-50%, 0); visibility: visible; }
+.sec-avatar { font-size: 1.8rem; line-height: 1; flex-shrink: 0; }
+.sec-body { flex: 1; min-width: 0; }
+.sec-text { font-size: 0.95rem; line-height: 1.5; overflow-wrap: anywhere; }
+.sec-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.sec-btn { border: none; border-radius: 12px; padding: 7px 12px; cursor: pointer; font: inherit; font-size: 0.85rem; background: var(--bg-color); color: var(--text-color); box-shadow: var(--small-outer); }
+.sec-btn:active { box-shadow: var(--inner-shadow); }
+.sec-btn.primary { background: var(--accent-color); color: #fff; font-weight: bold; box-shadow: none; }
+.sec-close { border: none; background: transparent; color: var(--faint); font-size: 1.3rem; cursor: pointer; flex-shrink: 0; line-height: 1; }
+.sec-range { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+#secAddRange { margin: 4px 0 10px; }
+
 /* --- 懸浮小視窗的進度條 --- */
 .mini-progress { height: 5px; margin: 2px 8px 0; border-radius: 3px; background: rgba(0, 0, 0, 0.1); overflow: hidden; }
 .mini-progress-fill { height: 100%; width: 0; border-radius: 3px; background: var(--accent-color); transition: width 0.4s linear; }

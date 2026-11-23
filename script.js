@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.20.3';
+const APP_VERSION = '2026.11.24.1';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -280,6 +280,10 @@ const ASK_TAG = 'pomodoro-ask';         // 正數太久時問「還在做嗎」�
 const ASK_REPEAT_MIN = 30; // 正數問過「還在做嗎」之後，每隔幾分鐘再問一次
 let pickPurpose = null;    // 「現在要做什麼？」視窗開著時的用途，見 openTaskPicker
 let qeDate = null;         // 記帳框目前顯示的日期（null＝今天）
+const SEC_TAG = 'pomodoro-secretary'; // 秘書的通知
+// 秘書的狀態（只在這台裝置）：上次有動作的時間、暫時不要問到幾點、目前泡泡在說什麼
+// ready：秘書啟動後才說話（載入途中結束的那一段不用接話，也避免用到還沒宣告的常數）
+let secState = { lastActive: Date.now(), snoozeUntil: 0, kind: null, candIdx: 0, hiddenAt: 0, ready: false };
 
 let keepAliveAudio = null;    // 手機背景保持計時用的靜音音訊，見 updateKeepAlive
 let keepAliveStopTimer = null;
@@ -642,6 +646,7 @@ function getElapsed() { return Math.max(0, Math.floor((Date.now() - countStart) 
 function tick() {
     if (!isRunning) return;
     if (Date.now() - lastTimesRefresh > 30000) refreshScheduleTimes();
+    checkMiniAsk();
     if (isCountUp()) { elapsed = getElapsed(); updateDisplay(); checkCountUpAsk(); return; } // 正數沒有終點，按「結束」才結算
     timeLeft = getRemaining();
     updateDisplay();
@@ -667,6 +672,8 @@ function startTimer(opts) {
                     plannedSec: countUp ? 0 : timeLeft, activeMs: 0, countUp };
     }
     session.segStart = Date.now();
+    secState.lastActive = Date.now();
+    if (['greet', 'idle', 'back', 'next', 'resume'].includes(secState.kind)) hideSecBubble();
     if (countUp) countStart = Date.now() - elapsed * 1000;
     else endTime = Date.now() + timeLeft * 1000;
     isRunning = true;
@@ -689,6 +696,7 @@ function stopTimer() {
         }
     }
     isRunning = false;
+    secState.lastActive = Date.now();
     clearInterval(tickTimer); clearTimeout(finishTimer);
     updateWakeLock();
 }
@@ -760,6 +768,7 @@ function finishCountUp(endAt) {
     const gain = rewardStart ? rewardGainText(rewardStart) : '';
     if (gain) { playTone('alarm'); showToast(`專注結束！${gain}`, null, null, 6000); }
     askTaskForLog(untagged);
+    secAfterPhase(wasFocus ? 'focus' : 'short', false);
     autoDriveSave(false);
 }
 
@@ -794,6 +803,7 @@ function finishPhase() {
         ? `專注結束！${gain ? gain + ' ' : ''}接下來是${MODE_LABELS[mode]}（${formatTime(timerSettings[mode])}）`
         : (auto ? '休息結束，下一顆蕃茄開始了！' : '休息結束，準備開始下一顆蕃茄！'), auto);
     askTaskForLog(untagged);
+    secAfterPhase(finished, auto);
     autoDriveSave(false);
 }
 
@@ -885,7 +895,7 @@ if ('serviceWorker' in navigator) {
         if (!e.data || e.data.type !== 'notification-click') return;
         // 點常駐通知只是回到網頁（系統會把通知收掉，這裡補發一則）；點「時間到」的通知才開始下一段
         if (e.data.tag === STATUS_TAG) { statusSig = ''; updateStatusNotification(); }
-        else if (e.data.tag === REMIND_TAG || e.data.tag === ASK_TAG) { /* 回到網頁就好，提示列上有按鈕 */ }
+        else if (e.data.tag === REMIND_TAG || e.data.tag === ASK_TAG || e.data.tag === SEC_TAG) { /* 回到網頁就好，提示列／秘書泡泡上有按鈕 */ }
         else if (e.data.tag === EXPENSE_TAG) openQuickExpense();
         else startFromPrompt();
     });
@@ -4129,6 +4139,372 @@ function saveEndTime(useNow) {
 document.getElementById('etNow').addEventListener('click', () => { playTone('click'); saveEndTime(true); });
 document.getElementById('etSave').addEventListener('click', () => { playTone('click'); saveEndTime(false); });
 
+/* --- 秘書：主動關心你、幫你決定現在做什麼 ---
+ * 設定存在時長設定的 secretary（會同步）；朗讀與否存在這台裝置的 prefs.secVoice。
+ * 網頁要還在執行才能關心你：電腦開著分頁可以，手機網頁在背景會被暫停，回到網頁時才會說話。 */
+const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00' };
+function secConf() {
+    const raw = timerSettings.secretary && typeof timerSettings.secretary === 'object' ? timerSettings.secretary : {};
+    const c = { ...SEC_DEFAULT, ...raw };
+    c.on = c.on !== false;
+    if (!['hours', 'always', 'open'].includes(c.when)) c.when = 'hours';
+    if (!['gentle', 'coach', 'brief'].includes(c.tone)) c.tone = 'gentle';
+    c.ranges = (Array.isArray(c.ranges) ? c.ranges : []).map(r => Array.isArray(r) ? [cleanTime(r[0]), cleanTime(r[1])] : [null, null])
+        .filter(r => r[0] && r[1]).slice(0, 5);
+    c.days = Array.isArray(c.days) ? c.days.filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : SEC_DEFAULT.days;
+    c.idle = cleanInt(c.idle, 5, 600, 30);
+    c.review = c.review === '' ? '' : (cleanTime(c.review) || '21:00');
+    return c;
+}
+function saveSecConf(c) { timerSettings.secretary = c; saveTimerSettings(); }
+// 現在是不是可以主動找你的時段
+function secInHours(c, now = new Date()) {
+    if (c.when === 'always') return true;
+    if (c.when === 'open') return false;
+    const hm = clockText(now.getTime());
+    const today = now.getDay(), yesterday = (today + 6) % 7;
+    return c.ranges.some(([from, to]) => from <= to
+        ? c.days.includes(today) && hm >= from && hm < to
+        : (c.days.includes(today) && hm >= from) || (c.days.includes(yesterday) && hm < to)); // 跨過午夜的時段
+}
+
+/* 說話的語氣：每種情況有幾句，隨機挑一句。{task} 換成任務名稱 */
+const SEC_LINES = {
+    gentle: {
+        greet: ['嗨，歡迎回來～', '你來了呀，今天也慢慢來就好。', '哈囉，今天過得還好嗎？'],
+        idle: ['休息得還好嗎？', '有一陣子沒計時了，還好嗎？', '我在這裡喔，需要的話我們一起開始。'],
+        next: ['休息結束了～', '充好電了嗎？'],
+        ask: ['要不要做一下「{task}」？先 5 分鐘也可以喔。', '試試「{task}」好嗎？做一點點就好。'],
+        none: ['想做點什麼嗎？先選一件小事就好。'],
+        resume: ['「{task}」還暫停著，要不要繼續？'],
+        praise: ['做得很好！', '辛苦了，真棒～', '又完成一顆了，好厲害！'],
+        mini: ['5 分鐘到了，你已經開始了，很棒！要繼續嗎？累了也可以先停。'],
+        miniStop: ['有開始就很了不起，休息一下吧，做的時間都記下來了。'],
+        rest: ['先休息一下吧。'],
+        review: ['今天辛苦了！{stats}早點休息喔。'],
+        reviewNone: ['今天好像沒有計時，沒關係，明天再一起試試看。']
+    },
+    coach: {
+        greet: ['來了！今天也一起衝吧！💪', '嘿！準備好了嗎？', '歡迎回來，戰士！'],
+        idle: ['休息夠了吧？回來囉！', '嘿，該動起來啦！', '時間在跑喔，我們上吧！'],
+        next: ['休息結束！', '電充滿了！'],
+        ask: ['下一顆就衝「{task}」吧！', '「{task}」，現在就幹掉它！'],
+        none: ['選一件事，馬上開始！'],
+        resume: ['「{task}」還沒做完，繼續衝！'],
+        praise: ['太強了！🔥', '漂亮！再來一顆！', '完美！手感正熱！'],
+        mini: ['5 分鐘完成！手感來了吧？繼續衝？'],
+        miniStop: ['OK！5 分鐘也是進步，記下來了！'],
+        rest: ['喘口氣，等等再上！'],
+        review: ['今日戰績：{stats}明天繼續加油！'],
+        reviewNone: ['今天還沒開張！明天拚回來！']
+    },
+    brief: {
+        greet: ['歡迎回來。'],
+        idle: ['一陣子沒計時了。'],
+        next: ['休息結束。'],
+        ask: ['下一件：「{task}」。'],
+        none: ['要做什麼？'],
+        resume: ['「{task}」暫停中。'],
+        praise: ['完成。'],
+        mini: ['5 分鐘到。繼續？'],
+        miniStop: ['已記錄。'],
+        rest: ['休息。'],
+        review: ['今日：{stats}'],
+        reviewNone: ['今天沒有記錄。']
+    }
+};
+function secLine(kind, vars = {}) {
+    const list = SEC_LINES[secConf().tone][kind] || SEC_LINES.gentle[kind];
+    return list[Math.floor(Math.random() * list.length)].replace(/\{(\w+)\}/g, (m, k) => (vars[k] != null ? vars[k] : ''));
+}
+
+/* 朗讀：用瀏覽器內建的語音（不用網路、不用錢） */
+function secSpeak(text) {
+    if (!prefs.secVoice || !('speechSynthesis' in window)) return;
+    try {
+        const synth = window.speechSynthesis;
+        synth.cancel();
+        const u = new SpeechSynthesisUtterance(text.replace(/[\u{1F300}-\u{1FAFF}\u2600-\u27BF]/gu, '').replace(/[「」]/g, ''));
+        u.lang = 'zh-TW';
+        const voices = synth.getVoices();
+        const v = voices.find(x => x.lang === 'zh-TW') || voices.find(x => /^zh/i.test(x.lang));
+        if (v) u.voice = v;
+        const tone = secConf().tone;
+        u.rate = tone === 'coach' ? 1.1 : (tone === 'gentle' ? 0.95 : 1);
+        u.pitch = tone === 'coach' ? 1.2 : (tone === 'gentle' ? 1.05 : 1);
+        u.volume = Math.min(1, Math.max(0, Number(prefs.volume) || 0)) || 0;
+        if (u.volume > 0) synth.speak(u);
+    } catch (err) {}
+}
+
+/* 泡泡：畫面下方的秘書對話框 */
+function showSecBubble(kind, text, actions, opts = {}) {
+    secState.kind = kind;
+    document.getElementById('secText').textContent = text;
+    const box = document.getElementById('secActions');
+    box.innerHTML = '';
+    actions.forEach(a => {
+        const b = rewardEl('button', a.primary ? 'sec-btn primary' : 'sec-btn', a.label);
+        b.addEventListener('click', () => { playTone('click'); a.fn(); });
+        box.appendChild(b);
+    });
+    document.getElementById('secBubble').classList.add('show');
+    if (opts.sound !== false) playTone('alarm');
+    secSpeak(text);
+    if (opts.notify && (document.hidden || !document.hasFocus())) { startAttention(); notify(text, SEC_TAG); }
+}
+function hideSecBubble() {
+    secState.kind = null;
+    const el = document.getElementById('secBubble');
+    if (el) el.classList.remove('show');
+}
+// 「我在休息」或關掉泡泡：過一段時間再問
+function secSnooze() {
+    secState.snoozeUntil = Date.now() + secConf().idle * 60000;
+    secState.lastActive = Date.now();
+    hideSecBubble();
+}
+document.getElementById('secClose').addEventListener('click', () => { playTone('click'); secSnooze(); });
+
+// 建議做什麼：任務條的順序 → 今天的固定任務 → 最近做過的
+function secCandidates() {
+    const names = [];
+    const add = n => { if (n && !names.includes(n)) names.push(n); };
+    document.querySelectorAll('#scheduleSlot .task-card:not(.drop-placeholder):not(.done) .task-name').forEach(e => add(e.innerText));
+    dueRepeats().forEach(t => add(t.name));
+    recentTaskNames(8).forEach(add);
+    return names;
+}
+function secStart(task, mini) {
+    hideSecBubble();
+    if (isRunning) return;
+    if (session) { startTimer(); return; }
+    if (mode !== 'focus') switchMode('focus');
+    startTimer({ task: task || '' });
+    if (mini && session) { session.mini = true; saveTimerState(); }
+}
+// kind：greet（打開網頁）、back（切回網頁）、idle（一陣子沒計時）、next（休息結束）
+function secSuggest(kind, opener) {
+    if (session && !isRunning && session.mode === 'focus') { // 有暫停中的專注：先問要不要繼續
+        const task = session.task || '剛剛那段';
+        showSecBubble('resume', `${opener ? opener + ' ' : ''}${secLine('resume', { task })}`, [
+            { label: '▶ 繼續', primary: true, fn: () => secStart() },
+            { label: '結束這段', fn: () => { hideSecBubble(); document.getElementById('resetBtn').click(); } },
+            { label: '等一下', fn: secSnooze }
+        ], { notify: kind === 'idle' });
+        return;
+    }
+    const cands = secCandidates();
+    const task = cands.length ? cands[secState.candIdx % cands.length] : '';
+    const text = `${opener ? opener + ' ' : ''}${task ? secLine('ask', { task }) : secLine('none')}`;
+    const actions = task ? [
+        { label: '▶ 開始', primary: true, fn: () => secStart(task, false) },
+        { label: '只做 5 分鐘', fn: () => secStart(task, true) }
+    ] : [
+        { label: '選一件事', primary: true, fn: () => { hideSecBubble(); if (mode !== 'focus' && !session) switchMode('focus'); openTaskPicker('start'); } }
+    ];
+    if (cands.length > 1) actions.push({ label: '換一個', fn: () => { secState.candIdx++; secSuggest(kind, opener); } });
+    if (task) actions.push({ label: '做別的', fn: () => { hideSecBubble(); if (mode !== 'focus' && !session) switchMode('focus'); openTaskPicker('start'); } });
+    actions.push({ label: kind === 'next' ? '再休息一下' : '我在休息', fn: secSnooze });
+    showSecBubble(kind, text, actions, { notify: kind === 'idle' || kind === 'next', sound: kind !== 'greet' });
+}
+
+// 今天的成績與比昨天同一時間多幾顆
+function secTodayStats() {
+    const today = todayKey(), yesterday = addDays(today, -1), nowHm = clockText(Date.now());
+    let sec = 0, pomo = 0, yPomo = 0;
+    loadLogs().forEach(l => {
+        if (l.mode !== 'focus') return;
+        if (dateKey(l.start) === today) sec += l.actualSec;
+        if (dateKey(l.end) === today) pomo += pomodorosOf(l);
+        if (dateKey(l.end) === yesterday && clockText(l.end) <= nowHm) yPomo += pomodorosOf(l);
+    });
+    const done = loadDone().filter(d => dateKey(d.at) === today).length;
+    return { sec, pomo, yPomo, done };
+}
+function secAfterPhase(finished, auto) {
+    if (!secState.ready) return;
+    const c = secConf();
+    if (!c.on) return;
+    if (finished === 'focus') {
+        const st = secTodayStats();
+        let text = `${secLine('praise')} 今天第 ${st.pomo} 顆 🍅`;
+        if (st.pomo > st.yPomo && st.yPomo > 0) text += `，比昨天這時候多 ${st.pomo - st.yPomo} 顆`;
+        else if (st.yPomo === 0 && st.pomo > 0) text += '';
+        text += '。';
+        hideToast();
+        const actions = (!auto && !isRunning && mode !== 'focus')
+            ? [{ label: '☕ 開始休息', primary: true, fn: () => { hideSecBubble(); startTimer(); } },
+               { label: '不休息，繼續', fn: () => { hideSecBubble(); switchMode('focus'); secSuggest('next'); } },
+               { label: '好', fn: hideSecBubble }]
+            : [{ label: '好', primary: true, fn: hideSecBubble }];
+        showSecBubble('praise', text + (actions.length > 1 ? ` ${secLine('rest')}` : ''), actions, { sound: false });
+    } else if (!auto && !isRunning) {
+        hideToast();
+        secState.candIdx = 0;
+        secSuggest('next', secLine('next'));
+    }
+}
+
+// 「只做 5 分鐘」：做滿 5 分鐘時問要不要繼續
+function checkMiniAsk() {
+    if (!secState.ready || !session || !session.mini || session.miniAsked || !isRunning || liveActiveSec() < 5 * 60) return;
+    session.miniAsked = true;
+    saveTimerState();
+    showSecBubble('mini', secLine('mini'), [
+        { label: '繼續做下去', primary: true, fn: hideSecBubble },
+        { label: '先到這裡', fn: secMiniStop }
+    ], { notify: true });
+}
+function secMiniStop() {
+    stopTimer(); endSession(false); // 做的時間照樣寫進時間記錄
+    timeLeft = timerSettings[mode];
+    elapsed = 0;
+    setStartBtn('start'); updateModeUI(); updateDisplay();
+    saveTimerState();
+    secState.snoozeUntil = Date.now() + secConf().idle * 60000;
+    showSecBubble('praise', secLine('miniStop'), [{ label: '好', primary: true, fn: hideSecBubble }], { sound: false });
+}
+
+// 晚上的回顧
+function secReview() {
+    const st = secTodayStats();
+    const parts = [];
+    if (st.sec) parts.push(`專注 ${Math.round(st.sec / 60)} 分鐘`);
+    if (st.pomo) parts.push(`${st.pomo} 顆 🍅`);
+    if (st.done) parts.push(`完成 ${st.done} 項任務`);
+    const text = parts.length ? secLine('review', { stats: parts.join('、') + '。' }) : secLine('reviewNone');
+    showSecBubble('review', text, [{ label: '好', primary: true, fn: hideSecBubble }], { notify: true });
+}
+
+function secBusy() { return drag || document.querySelector('.modal-overlay.show') || document.getElementById('secBubble').classList.contains('show'); }
+// 每 30 秒檢查一次要不要主動說話
+function secCheck() {
+    const c = secConf();
+    if (!c.on || !isUnlocked() || isRunning || secBusy()) return;
+    const now = Date.now(), today = todayKey();
+    if (c.review) {
+        const at = new Date(`${today}T${c.review}`).getTime();
+        if (now >= at && readFired().__review !== today) {
+            markFired('__review');
+            if (now - at <= 3 * 3600 * 1000) { secReview(); return; }
+        }
+    }
+    if (c.when === 'open' || now < secState.snoozeUntil || !secInHours(c)) return;
+    if (now - secState.lastActive < c.idle * 60000) return;
+    secState.candIdx = 0;
+    secSuggest('idle', secLine('idle'));
+}
+// 打開網頁：等「今日開始」等視窗處理完再打招呼
+function secGreet(tries = 0) {
+    const c = secConf();
+    if (!c.on || isRunning) return;
+    if (!isUnlocked() || document.querySelector('.modal-overlay.show') || drag) {
+        if (tries < 40) setTimeout(() => secGreet(tries + 1), 3000);
+        return;
+    }
+    if (document.getElementById('secBubble').classList.contains('show')) return;
+    if (c.when === 'hours' && !secInHours(c)) return;
+    secState.candIdx = 0;
+    secSuggest('greet', secLine('greet'));
+}
+function startSecretary() {
+    secState.ready = true;
+    whenUnlocked(() => setTimeout(secGreet, 4000));
+    setInterval(secCheck, 30000);
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) { secState.hiddenAt = Date.now(); return; }
+        // 離開超過設定的時間才回來：打個招呼（手機網頁在背景時不會執行，只能在這時候說話）
+        const c = secConf();
+        const away = secState.hiddenAt ? Date.now() - secState.hiddenAt : 0;
+        secState.hiddenAt = 0;
+        if (c.on && away >= c.idle * 60000 && !isRunning && !secBusy() && (c.when !== 'hours' || secInHours(c))) {
+            secState.candIdx = 0;
+            secSuggest('back', secLine('greet'));
+        } else secCheck();
+    });
+}
+
+/* 秘書設定視窗 */
+const SEC_WHEN_NOTE = {
+    hours: '只有在下面的時段、沒在計時一陣子時才會來問。打開網頁時（在時段內）會打招呼。',
+    always: '網頁開著的時候，沒在計時一陣子就會來問。',
+    open: '平常不打擾，只有打開網頁或隔一陣子切回網頁時才會問你要做什麼。'
+};
+function renderSecSettings() {
+    const c = secConf();
+    document.getElementById('secOn').checked = c.on;
+    document.getElementById('secBody').style.opacity = c.on ? '' : '0.45';
+    document.querySelectorAll('#secWhen .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.v === c.when));
+    document.getElementById('secWhenNote').textContent = SEC_WHEN_NOTE[c.when];
+    document.getElementById('secHoursBox').style.display = c.when === 'hours' ? '' : 'none';
+    const list = document.getElementById('secRanges');
+    list.innerHTML = '';
+    c.ranges.forEach((r, i) => {
+        const row = rewardEl('div', 'sec-range');
+        const from = document.createElement('input'); from.type = 'time'; from.className = 'text-input rw-num'; from.value = r[0];
+        const to = document.createElement('input'); to.type = 'time'; to.className = 'text-input rw-num'; to.value = r[1];
+        const del = rewardEl('button', 'qe-del', '✕'); del.title = '刪除這個時段';
+        const commit = () => {
+            const cc = secConf(); const a = cleanTime(from.value), b = cleanTime(to.value);
+            if (!a || !b) return;
+            cc.ranges[i] = [a, b]; saveSecConf(cc);
+        };
+        from.addEventListener('change', commit); to.addEventListener('change', commit);
+        del.addEventListener('click', () => { playTone('delete'); const cc = secConf(); cc.ranges.splice(i, 1); saveSecConf(cc); renderSecSettings(); });
+        row.appendChild(from); row.appendChild(rewardEl('span', 'rw-preview', '到')); row.appendChild(to); row.appendChild(del);
+        list.appendChild(row);
+    });
+    if (!c.ranges.length) list.appendChild(rewardEl('div', 'stats-empty', '還沒有時段，不會主動來問'));
+    document.querySelectorAll('#secDays .seg-btn').forEach(b => b.classList.toggle('active', c.days.includes(Number(b.dataset.day))));
+    document.getElementById('secIdle').value = c.idle;
+    document.querySelectorAll('#secTone .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.v === c.tone));
+    document.getElementById('secVoice').checked = !!prefs.secVoice;
+    document.getElementById('secReviewOn').checked = !!c.review;
+    document.getElementById('secReview').value = c.review || '21:00';
+    document.getElementById('secReview').disabled = !c.review;
+}
+function openSecSettings() { renderSecSettings(); toggleModal(true, 'secModal'); }
+function secEdit(fn) { const c = secConf(); fn(c); saveSecConf(c); renderSecSettings(); }
+document.getElementById('secOn').addEventListener('change', (e) => secEdit(c => { c.on = e.target.checked; if (!c.on) hideSecBubble(); }));
+document.getElementById('secWhen').addEventListener('click', (e) => {
+    const b = e.target.closest('.seg-btn'); if (!b) return;
+    playTone('click'); secEdit(c => { c.when = b.dataset.v; });
+});
+document.getElementById('secAddRange').addEventListener('click', () => {
+    playTone('click');
+    secEdit(c => { if (c.ranges.length < 5) c.ranges.push(['14:00', '18:00']); });
+});
+document.getElementById('secDays').addEventListener('click', (e) => {
+    const b = e.target.closest('.seg-btn'); if (!b) return;
+    playTone('click');
+    const d = Number(b.dataset.day);
+    secEdit(c => { c.days = c.days.includes(d) ? c.days.filter(x => x !== d) : [...c.days, d].sort(); });
+});
+document.getElementById('secIdle').addEventListener('change', (e) => secEdit(c => { c.idle = cleanInt(e.target.value, 5, 600, 30); }));
+document.getElementById('secTone').addEventListener('click', (e) => {
+    const b = e.target.closest('.seg-btn'); if (!b) return;
+    playTone('click'); secEdit(c => { c.tone = b.dataset.v; });
+    secSpeak(secLine('greet'));
+});
+document.getElementById('secVoice').addEventListener('change', (e) => {
+    prefs.secVoice = e.target.checked; savePrefs();
+    if (e.target.checked) secSpeak(secLine('greet'));
+});
+document.getElementById('secReviewOn').addEventListener('change', (e) => secEdit(c => { c.review = e.target.checked ? (cleanTime(document.getElementById('secReview').value) || '21:00') : ''; }));
+document.getElementById('secReview').addEventListener('change', (e) => {
+    const t = cleanTime(e.target.value); if (!t) return;
+    secEdit(c => { c.review = t; });
+    const f = readFired(); // 改了時間：今天還沒到新時間就讓它再說一次
+    if (f.__review && new Date(`${todayKey()}T${t}`).getTime() > Date.now()) { delete f.__review; localStorage.setItem(REMIND_FIRED_KEY, JSON.stringify(f)); }
+});
+document.getElementById('secTry').addEventListener('click', () => {
+    toggleModal(false, 'secModal');
+    if (isRunning) { showSecBubble('praise', `${secLine('praise')} 計時中，我先不打擾你。`, [{ label: '好', primary: true, fn: hideSecBubble }]); return; }
+    secState.candIdx = 0;
+    secSuggest('greet', secLine('greet'));
+});
+
 /* --- 從捷徑開啟：網址帶 ?do=expense（記帳）或 ?do=focus（開始專注） --- */
 function whenUnlocked(fn) {
     if (isUnlocked()) { fn(); return; }
@@ -4200,6 +4576,7 @@ window.pomodoroApp = {
             Object.assign(timerSettings, incoming);
             if (!session && !isRunning) { timeLeft = timerSettings[mode]; elapsed = 0; }
             updateModeUI(); updateDisplay(); renderSettings();
+            if (document.getElementById('secModal').classList.contains('show')) renderSecSettings();
             // 別台裝置已經處理過「今日開始」：這裡還開著的話就收掉
             if (dayPending && timerSettings.dayStarted === todayKey()) { dayPending = null; toggleModal(false, 'dayModal'); }
         }
@@ -4215,6 +4592,7 @@ const ACTIONS = {
     'open-ai': () => openAiModal(),
     'open-rewards': () => openRewards(),
     'open-expense': () => openQuickExpense(),
+    'open-secretary': () => openSecSettings(),
     'stats-prev': () => shiftStats(-1),
     'stats-next': () => shiftStats(1),
     'open-sync': () => toggleModal(true, 'syncModal'),
@@ -4265,6 +4643,7 @@ window.addEventListener('DOMContentLoaded', () => {
     if (prefs.lastVersion !== APP_VERSION) { prefs.lastVersion = APP_VERSION; savePrefs(); }
     renderReminders();
     handleLaunchAction();
+    startSecretary();
     setInterval(checkReminders, 15000);
     setTimeout(checkReminders, 3000); // 等同步把別台裝置的提醒帶進來
     document.addEventListener('visibilitychange', () => { if (!document.hidden) checkReminders(); });
