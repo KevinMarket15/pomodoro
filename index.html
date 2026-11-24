@@ -476,6 +476,21 @@
             </div>
             <div class="setting-note">秘書會從任務條、今天的固定任務、最近做過的任務裡挑一件建議你，按「▶ 開始」就開始計時；沒力氣時按「只做 5 分鐘」，5 分鐘到會問你要不要繼續，停下來也會記在時間記錄。網頁要開著才會說話：手機網頁在背景會被暫停，回到網頁時才會出現。</div>
         </div>
+        <div class="modal-section">
+            <div class="modal-title">🤖 聊天機器人</div>
+            <div class="setting-row setting-col">
+                <span class="setting-label">主動訊息傳到<small>網頁關著也會收到：計時結束、定時提醒、記帳提醒，以及秘書的關心（秘書關掉時只送前三種）</small></span>
+                <div class="seg" id="secBot">
+                    <button class="seg-btn" data-v="telegram">Telegram</button>
+                    <button class="seg-btn" data-v="off">不傳</button>
+                </div>
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">你的帳號編號<small id="secUid">登入後顯示</small></span>
+                <button class="action-btn" id="secCopyUid">複製</button>
+            </div>
+            <div class="setting-note">在 Telegram 打「120 午餐」就能記帳，打「開始 寫報告」就開始計時。機器人要先照<a href="https://github.com/KevinMarket15/pomodoro/blob/main/bot/README.md" target="_blank" rel="noopener">設定說明</a>建立一次，帳號編號會用到。</div>
+        </div>
     </div>
 </div>
 
@@ -639,6 +654,7 @@
                 <li><strong>目前任務：</strong>凹槽最上面的任務就是目前任務（以按下開始時為準）。要換任務，把它拖到最上面。</li>
                 <li><strong>時間記錄：</strong>每段專注與休息結束後會自動記錄時間、任務與實際時長（中途結束的標示「中斷」），保留一年。按凹槽下方「時間記錄」查看，用 ‹ › 切換到過去有記錄的日子；可匯出當天的 CSV（試算表）或 Markdown（筆記），或一次匯出全部記錄的 CSV。</li>
                 <li><strong>秘書：</strong>右上角 💬。打開網頁、休息結束或一陣子沒計時，秘書會建議你現在做什麼，按「▶ 開始」就開始；沒力氣時按「只做 5 分鐘」。做完會鼓勵你，晚上會回顧今天。什麼時段可以來問、語氣、要不要念出來，都在 💬 裡設定。</li>
+                <li><strong>聊天機器人：</strong>照 💬 裡的設定說明建立 Telegram 機器人後，網頁關著也會收到計時結束、提醒和秘書的關心；在 Telegram 打「120 午餐」記帳、「開始 寫報告」開始計時、「結束」結束，網頁打開時會同步。</li>
                 <li><strong>快速記帳：</strong>按計時器下方的「💸 記帳」（或右上角選單），在同一格打「120 午餐」按記下就好，帳戶會用上次選的。每天晚上 9 點會提醒你記帳（⚙ 設定裡可以改時間或關掉）。</li>
                 <li><strong>沒排任務也能開始：</strong>任務條沒有任務時按開始，會問「現在要做什麼？」，打字或點最近做過的任務就開始；也可以先開始、結束後再選。計時中點計時器下方的任務名稱可以更換。這樣開始的任務只記在時間記錄，不會加進任務條。</li>
                 <li><strong>忘了按結束：</strong>正數計時超過 90 分鐘（⚙ 設定可改）會問你還在做嗎；按結束時可以改成實際結束的時間，記錄就不會多算。</li>

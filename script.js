@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.24.1';
+const APP_VERSION = '2026.11.24.2';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -4142,7 +4142,8 @@ document.getElementById('etSave').addEventListener('click', () => { playTone('cl
 /* --- 秘書：主動關心你、幫你決定現在做什麼 ---
  * 設定存在時長設定的 secretary（會同步）；朗讀與否存在這台裝置的 prefs.secVoice。
  * 網頁要還在執行才能關心你：電腦開著分頁可以，手機網頁在背景會被暫停，回到網頁時才會說話。 */
-const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00' };
+// bot：聊天機器人（bot/worker.js）的主動訊息傳到哪裡：'telegram'、'off'（之後可能有 'discord'、'both'）
+const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00', bot: 'telegram' };
 function secConf() {
     const raw = timerSettings.secretary && typeof timerSettings.secretary === 'object' ? timerSettings.secretary : {};
     const c = { ...SEC_DEFAULT, ...raw };
@@ -4154,6 +4155,7 @@ function secConf() {
     c.days = Array.isArray(c.days) ? c.days.filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : SEC_DEFAULT.days;
     c.idle = cleanInt(c.idle, 5, 600, 30);
     c.review = c.review === '' ? '' : (cleanTime(c.review) || '21:00');
+    if (!['off', 'telegram', 'discord', 'both'].includes(c.bot)) c.bot = 'telegram';
     return c;
 }
 function saveSecConf(c) { timerSettings.secretary = c; saveTimerSettings(); }
@@ -4463,6 +4465,10 @@ function renderSecSettings() {
     document.getElementById('secReviewOn').checked = !!c.review;
     document.getElementById('secReview').value = c.review || '21:00';
     document.getElementById('secReview').disabled = !c.review;
+    document.querySelectorAll('#secBot .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.v === c.bot));
+    const uid = window.pomodoroSync && window.pomodoroSync.uid ? window.pomodoroSync.uid() : null;
+    document.getElementById('secUid').textContent = uid || '登入後顯示';
+    document.getElementById('secCopyUid').disabled = !uid;
 }
 function openSecSettings() { renderSecSettings(); toggleModal(true, 'secModal'); }
 function secEdit(fn) { const c = secConf(); fn(c); saveSecConf(c); renderSecSettings(); }
@@ -4490,6 +4496,17 @@ document.getElementById('secTone').addEventListener('click', (e) => {
 document.getElementById('secVoice').addEventListener('change', (e) => {
     prefs.secVoice = e.target.checked; savePrefs();
     if (e.target.checked) secSpeak(secLine('greet'));
+});
+document.getElementById('secBot').addEventListener('click', (e) => {
+    const b = e.target.closest('.seg-btn'); if (!b) return;
+    playTone('click'); secEdit(c => { c.bot = b.dataset.v; });
+});
+document.getElementById('secCopyUid').addEventListener('click', async () => {
+    const uid = window.pomodoroSync && window.pomodoroSync.uid ? window.pomodoroSync.uid() : null;
+    if (!uid) return;
+    playTone('click');
+    if (await copyText(uid)) showToast('已複製帳號編號', null, null, 3000);
+    else prompt('複製這個帳號編號：', uid);
 });
 document.getElementById('secReviewOn').addEventListener('change', (e) => secEdit(c => { c.review = e.target.checked ? (cleanTime(document.getElementById('secReview').value) || '21:00') : ''; }));
 document.getElementById('secReview').addEventListener('change', (e) => {

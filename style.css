@@ -627,3 +627,7 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 #manualLogModal { z-index: 210; }
 #mlQuick { margin: 4px 0 8px; }
 #mlTime, #remTime { width: 9.5em; flex: none; }
+
+/* --- 秘書設定：聊天機器人 --- */
+#secUid { word-break: break-all; user-select: all; }
+.setting-note a { color: inherit; text-decoration: underline; }

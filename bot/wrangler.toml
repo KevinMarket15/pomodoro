@@ -1,0 +1,13 @@
+# Cloudflare Workers 設定（部署：在這個資料夾執行 npx wrangler deploy）
+name = "pomodoro-bot"
+main = "worker.js"
+compatibility_date = "2025-06-01"
+
+# 每分鐘檢查一次：計時結束、定時提醒、記帳提醒、秘書主動找你
+[triggers]
+crons = ["* * * * *"]
+
+# 金鑰不要寫在這裡（這個檔案是公開的），用 npx wrangler secret put 設定：
+#   TELEGRAM_TOKEN、FIREBASE_SA、FIREBASE_UID
+[vars]
+TIMEZONE = "Asia/Taipei"

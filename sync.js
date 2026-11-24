@@ -518,6 +518,7 @@ async function driveSave(interactive) {
 /* --- 給 script.js 用 --- */
 window.pomodoroSync = {
     isSignedIn: () => !!uid,
+    uid: () => uid, // 聊天機器人設定時要用
     flush,
     driveSave,
     // 重置全部時一併清空雲端
