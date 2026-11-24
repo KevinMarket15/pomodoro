@@ -483,9 +483,24 @@ function addToTaskBar(ctx, name) {
         list.splice(firstDone < 0 ? list.length : firstDone, 0, { id: newItemId(), name, color: info.color, est: info.est });
     }
     ctx.set('schedule', list);
-    const pos = undone(list).findIndex(t => t.name === name) + 1;
+    const card = undone(list).find(t => t.name === name), pos = undone(list).indexOf(card) + 1;
+    const bot = touchBot(ctx);
+    bot.pick = name;                            // 「▶ 現在開始」用
+    bot.lastAdd = { id: card.id, n: info.est }; // 「取消」用（只能取消最近一次）
     ctx.say(last && last.name === name ? `「${name}」多排了 ${info.est} 顆（共 ${last.est} 顆）。` : `已把「${name}」排進任務條（第 ${pos} 個）。`,
-        [[['▶ 現在開始', 'pg']]]);
+        [[['▶ 現在開始', 'pg'], ['取消', 'pu']]]);
+}
+// 取消最近一次排進任務條：疊加的就減回去，新加的（還沒做過）就拿掉
+function undoAdd(ctx) {
+    const bot = touchBot(ctx), add = bot.lastAdd;
+    if (!add) { ctx.say('這個按鈕已經過期了，要改的話到網頁上改。'); return; }
+    const list = scheduleOf(ctx), card = list.find(c => c.id === add.id);
+    if (!card || card.done) { ctx.say('這張已經變了（可能完成或刪掉了），要改的話到網頁上改。'); return; }
+    if ((card.est || 1) > add.n) { card.est -= add.n; ctx.say(`已取消，「${card.name}」改回 ${card.est} 顆。`); }
+    else if (!card.did) { list.splice(list.indexOf(card), 1); ctx.say(`已把「${card.name}」從任務條拿掉。`); }
+    else { ctx.say('這張已經開始做了，要改的話到網頁上改。'); return; }
+    bot.lastAdd = null;
+    ctx.set('schedule', list);
 }
 function todayStats(ctx) {
     const today = dateKey(ctx.now);
@@ -579,6 +594,7 @@ const HELP = [
     '・休息：開始休息',
     '・120 午餐：記一筆支出（記到上次用的帳戶，可以再改）',
     '・任務：看建議和任務庫，點了可以開始或排進任務條',
+    '・在看直播：把「看直播」排進任務條（開頭打「在」）',
     '・狀態：現在在做什麼',
     '・今天：今天的成績',
     '',
@@ -690,6 +706,12 @@ async function onText(ctx, text) {
         ctx.say((statsText(st) ? `今天：${statsText(st)}` : '今天還沒有專注記錄。') + spent);
         return;
     }
+    // 「在看直播」「正在看直播」：把「看直播」排進任務條（開頭的「在」就是記號，所以比記帳先判斷）
+    if ((m = t.match(/^(?:正在|在)\s*(.+)$/s))) {
+        await prepTimer(ctx); await ctx.load('categories'); catchUp(ctx);
+        addToTaskBar(ctx, m[1].trim().slice(0, 200));
+        return;
+    }
     const p = parseExpense(t);
     if (p) { await ctx.load('bot'); await addExpense(ctx, p); return; }
     ctx.say('我看不太懂 😅 傳「說明」看看可以怎麼跟我說。');
@@ -764,7 +786,8 @@ async function onButton(ctx, data) {
         if (!bot.pick) { ctx.say('這個按鈕已經過期了，按「任務」再選一次。'); return; }
         if (cmd === 'pa') { await ctx.load('categories'); addToTaskBar(ctx, bot.pick); }
         else startFocus(ctx, bot.pick, cmd === 'pm');
-    } else if (cmd === 'ea' || cmd === 'ex') {
+    } else if (cmd === 'pu') undoAdd(ctx);
+    else if (cmd === 'ea' || cmd === 'ex') {
         await ctx.load('rewards');
         const r = rewardsOf(ctx), x = r.expenses.find(e => e.id === a);
         if (!x) { ctx.say('找不到這筆支出了（可能已經在網頁上刪除）。'); return; }
