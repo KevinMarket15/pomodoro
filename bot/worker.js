@@ -882,16 +882,18 @@ async function tick(ctx) {
                 ctx.say(`⏱ ${keep ? `${keep}` : ''}已經${focus ? '專注' : '休息'} ${durationText(sec)}了，還在${focus ? '做' : '休息'}嗎？`,
                     [[['還在', 'still'], ['先暫停', 'pause']], opts]);
                 if (!focus) restAsked(ctx, c); // 已經問過休息的事，關心延後一輪
+                else if (c.cheer) se.cheered = Math.max(se.cheered || 0, Math.floor(min / c.cheer)); // 這則就算這一輪的鼓勵
             }
         }
     }
-    // 3b. 專注中：每 c.cheer 分鐘鼓勵一下、問還在不在（正數到了上面「還在做嗎」的時間，就只問那一則）
+    // 3b. 專注中：每 c.cheer 分鐘鼓勵一下、問還在不在。機器人自己剛問過「還在做嗎」就不重複；
+    // 網頁開著時「還在做嗎」是網頁問的（session.asked 已經記了），Telegram 這邊照樣要鼓勵
     const sc = stateOf(ctx).session;
     if (c.on && c.cheer && !spoke && sc && sc.mode === 'focus' && stateOf(ctx).isRunning) {
         const min = Math.floor(liveActiveSec(stateOf(ctx), now) / 60), k = Math.floor(min / c.cheer);
         if (k >= 1 && k > (sc.cheered || 0)) {
             sc.cheered = k; saveState(ctx);
-            if (send && !(first && sc.countUp && min >= first)) {
+            if (send) {
                 spoke = true;
                 ctx.say(`💪 ${secLine(ctx, 'cheer', { min: durationText(k * c.cheer * 60) })}還在嗎？`, [[['還在', 'still'], ['先暫停', 'pause'], ['結束', 'end']]]);
             }
