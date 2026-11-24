@@ -29,7 +29,7 @@ const DOCS = {
     state: 'kv/state', timer: 'kv/timer', schedule: 'kv/schedule', categories: 'kv/categories',
     rewards: 'kv/rewards', reminders: 'kv/reminders', done: 'kv/done', bot: 'bot/state'
 };
-const KEYBOARD = { keyboard: [[{ text: '開始' }, { text: '暫停' }, { text: '結束' }], [{ text: '狀態' }, { text: '今天' }, { text: '說明' }]], resize_keyboard: true, is_persistent: true };
+const KEYBOARD = { keyboard: [[{ text: '開始' }, { text: '暫停' }, { text: '結束' }], [{ text: '任務' }, { text: '狀態' }, { text: '今天' }, { text: '說明' }]], resize_keyboard: true, is_persistent: true };
 
 /* ---------- 時間（依使用者的時區，不是伺服器的 UTC） ---------- */
 let ZONE = 'Asia/Taipei';
@@ -446,6 +446,43 @@ function suggest(ctx, kind, opener) {
     if (kind !== 'ask') rows.push([[kind === 'next' ? '再休息一下' : '我在休息', 'snooze']]);
     ctx.say(pre + secLine(ctx, 'ask', { task: cands[0] }) + (cands.length > 1 ? '\n或是選別的：' : ''), rows);
 }
+// 「任務」：建議的任務＋任務庫的類別（點類別再列任務）
+function showTasks(ctx) {
+    const bot = touchBot(ctx), cands = candidates(ctx), cats = categoriesOf(ctx);
+    bot.cands = cands;
+    const rows = [];
+    const two = list => { for (let i = 0; i < list.length; i += 2) rows.push(list.slice(i, i + 2)); };
+    two(cands.map((n, i) => [`💡 ${clip(n, 14)}`, `pk:${i}`]));
+    two(cats.map((c, i) => [`📚 ${clip(c.title, 10)}（${c.tasks.length}）`, `cat:${i}`]).filter((x, i) => cats[i].tasks.length));
+    if (!rows.length) { ctx.say('任務庫是空的。可以到網頁新增任務，或直接傳「開始 任務名稱」。'); return; }
+    const notes = ['要做什麼？'];
+    if (cands.length) notes.push('💡 是建議（任務條、今天的固定任務、最近做過的）');
+    if (cats.length) notes.push('📚 是任務庫的類別，點了看裡面的任務');
+    ctx.say(notes.join('\n'), rows);
+}
+function showCategory(ctx, i) {
+    const c = categoriesOf(ctx)[i];
+    if (!c || !c.tasks.length) { ctx.say('任務庫已經變了，按「任務」再選一次。'); return; }
+    const rows = [];
+    const items = c.tasks.slice(0, 40).map((t, j) => [clip(t, 16), `pt:${i}:${j}`]);
+    for (let k = 0; k < items.length; k += 2) rows.push(items.slice(k, k + 2));
+    rows.push([['‹ 回到任務', 'tasks']]);
+    ctx.say(`📚 ${c.title}${c.tasks.length > 40 ? `（只列前 40 個，共 ${c.tasks.length} 個）` : ''}`, rows);
+}
+// 排進任務條：和網頁一樣，還沒完成的最後一張剛好同名就多排幾顆，否則排在已完成的前面
+function addToTaskBar(ctx, name) {
+    const list = scheduleOf(ctx), info = taskInfo(ctx, name);
+    const open = undone(list), last = open[open.length - 1];
+    if (last && last.name === name) last.est = Math.min(12, (last.est || 1) + info.est);
+    else {
+        const firstDone = list.findIndex(t => t.done);
+        list.splice(firstDone < 0 ? list.length : firstDone, 0, { id: newItemId(), name, color: info.color, est: info.est });
+    }
+    ctx.set('schedule', list);
+    const pos = undone(list).findIndex(t => t.name === name) + 1;
+    ctx.say(last && last.name === name ? `「${name}」多排了 ${info.est} 顆（共 ${last.est} 顆）。` : `已把「${name}」排進任務條（第 ${pos} 個）。`,
+        [[['▶ 現在開始', 'pg']]]);
+}
 function todayStats(ctx) {
     const today = dateKey(ctx.now);
     let sec = 0, pomo = 0;
@@ -537,6 +574,7 @@ const HELP = [
     '・暫停／繼續／結束',
     '・休息：開始休息',
     '・120 午餐：記一筆支出（記到上次用的帳戶，可以再改）',
+    '・任務：看建議和任務庫，點了可以開始或排進任務條',
     '・狀態：現在在做什麼',
     '・今天：今天的成績',
     '',
@@ -620,7 +658,7 @@ function startBreak(ctx) {
 }
 
 async function onText(ctx, text) {
-    const t = text.trim().replace(/^\/(\w+)(@\w+)?/, (m, c) => ({ help: '說明', status: '狀態', today: '今天', pause: '暫停', resume: '繼續', stop: '結束', focus: '開始', rest: '休息' }[c] || m));
+    const t = text.trim().replace(/^\/(\w+)(@\w+)?/, (m, c) => ({ help: '說明', status: '狀態', today: '今天', pause: '暫停', resume: '繼續', stop: '結束', focus: '開始', rest: '休息', tasks: '任務' }[c] || m));
     let m;
     if (/^(說明|幫助|help|\?|？)$/i.test(t)) { ctx.say(HELP, null, { keyboard: true }); return; }
     if ((m = t.match(/^開始\s*(.*)$/s))) {
@@ -638,6 +676,7 @@ async function onText(ctx, text) {
     if (/^(結束|停|停止|stop)$/i.test(t)) { await prepTimer(ctx); catchUp(ctx); endNow(ctx); return; }
     if (/^休息$/.test(t)) { await prepTimer(ctx); catchUp(ctx); startBreak(ctx); return; }
     if (/^(狀態|現在|status)$/i.test(t)) { await prepTimer(ctx); catchUp(ctx); ctx.say(statusLine(ctx), statusButtons(ctx)); return; }
+    if (/^(任務|任務庫|tasks)$/i.test(t)) { await prepTimer(ctx); await prepSuggest(ctx); showTasks(ctx); return; }
     if (/^(今天|today)$/i.test(t)) {
         await prepTimer(ctx); await ctx.load('done', 'rewards'); catchUp(ctx);
         const st = todayStats(ctx);
@@ -702,6 +741,19 @@ async function onButton(ctx, data) {
         ctx.set('schedule', list);
         if (cmd === 'rs') startFocus(ctx, rem.name);
         else ctx.say(`已把「${rem.name}」${rem.next ? `和「${rem.next}」` : ''}排到任務條最上面。`);
+    } else if (cmd === 'tasks') { await prepSuggest(ctx); showTasks(ctx); }
+    else if (cmd === 'cat') { await prepSuggest(ctx); showCategory(ctx, Number(a)); }
+    else if (cmd === 'pk' || cmd === 'pt') {
+        await prepSuggest(ctx);
+        const c = categoriesOf(ctx)[Number(a)];
+        const name = cmd === 'pk' ? (bot.cands || [])[Number(a)] : c && c.tasks[Number(b)];
+        if (name == null) { ctx.say('任務庫已經變了，按「任務」再選一次。'); return; }
+        bot.pick = name;
+        ctx.say(`「${name}」要怎麼做？`, [[['▶ 開始', 'pg'], ['只做 5 分鐘', 'pm']], [['排進任務條', 'pa']]]);
+    } else if (cmd === 'pg' || cmd === 'pm' || cmd === 'pa') {
+        if (!bot.pick) { ctx.say('這個按鈕已經過期了，按「任務」再選一次。'); return; }
+        if (cmd === 'pa') { await ctx.load('categories'); addToTaskBar(ctx, bot.pick); }
+        else startFocus(ctx, bot.pick, cmd === 'pm');
     } else if (cmd === 'ea' || cmd === 'ex') {
         await ctx.load('rewards');
         const r = rewardsOf(ctx), x = r.expenses.find(e => e.id === a);
@@ -830,8 +882,7 @@ async function tg(env, method, body) {
 }
 function tgMarkup(m) {
     if (m.buttons) return { inline_keyboard: m.buttons.map(row => row.map(([text, data]) => ({ text, callback_data: data }))) };
-    if (m.keyboard) return KEYBOARD;
-    return undefined;
+    return KEYBOARD; // 沒有訊息按鈕時都附上輸入框下面的按鈕（舊的按鈕排列也會跟著更新）
 }
 async function sendAll(env, chat, msgs) {
     for (const m of msgs) await tg(env, 'sendMessage', { chat_id: chat, text: m.text, reply_markup: tgMarkup(m) });
@@ -918,7 +969,7 @@ async function setupPage(env, origin) {
             await tg(env, 'setMyCommands', { commands: [
                 { command: 'status', description: '現在在做什麼' }, { command: 'focus', description: '開始專注' },
                 { command: 'pause', description: '暫停' }, { command: 'stop', description: '結束' },
-                { command: 'today', description: '今天的成績' }, { command: 'help', description: '說明' }
+                { command: 'tasks', description: '建議和任務庫' }, { command: 'today', description: '今天的成績' }, { command: 'help', description: '說明' }
             ] });
             ok(linked, linked ? '已經連結你的 Telegram' : `還沒連結：打開 <a href="https://t.me/${botName}">t.me/${botName}</a>，按「開始」或傳 /start`);
         }
