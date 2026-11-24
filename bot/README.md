@@ -47,38 +47,38 @@
 
 ## 第 4 步：把機器人放上 Cloudflare
 
-在電腦上打開 PowerShell，**一行一行**執行（每行跑完再跑下一行）：
+在電腦上打開 PowerShell，**一行一行**執行（每行跑完再跑下一行）。指令用 `npx.cmd` 而不是 `npx`，因為 Windows 預設會擋 `npx` 這種指令碼：
 
 ```powershell
 cd "C:\雜七雜八\網頁\Tomato\bot"
 ```
 
 ```powershell
-npx wrangler login
+npx.cmd wrangler login
 ```
 第一次會問要不要安裝 wrangler，輸入 `y` 按 Enter。接著會打開瀏覽器，登入 Cloudflare 後按「Allow」。
 
 ```powershell
-npx wrangler deploy
+npx.cmd wrangler deploy
 ```
 第一次會請你幫自己的網址取一個名字（workers.dev 子網域），隨便取一個英文名字。完成後會顯示機器人的網址，像 `https://pomodoro-bot.你取的名字.workers.dev`，記下來。
 
 接著設定三個金鑰。每行執行後會叫你貼上內容，貼上後按 Enter：
 
 ```powershell
-npx wrangler secret put TELEGRAM_TOKEN
+npx.cmd wrangler secret put TELEGRAM_TOKEN
 ```
 貼上第 1 步的權杖。
 
 ```powershell
-npx wrangler secret put FIREBASE_UID
+npx.cmd wrangler secret put FIREBASE_UID
 ```
 貼上你的**帳號編號**：打開蕃茄鐘網頁 → 右上角 💬 秘書 → 最下面「🤖 聊天機器人」→ 按「複製」。
 
 最後是第 2 步下載的金鑰檔。把下面這行的檔名換成你下載的檔名再執行：
 
 ```powershell
-Get-Content "$HOME\Downloads\pomodoro-2cd61-firebase-adminsdk-xxxxx.json" -Raw | npx wrangler secret put FIREBASE_SA
+Get-Content "$HOME\Downloads\pomodoro-2cd61-firebase-adminsdk-xxxxx.json" -Raw | npx.cmd wrangler secret put FIREBASE_SA
 ```
 
 > 不知道確切檔名的話，可以先執行 `dir "$HOME\Downloads\*firebase*"` 看看。
@@ -111,7 +111,7 @@ Get-Content "$HOME\Downloads\pomodoro-2cd61-firebase-adminsdk-xxxxx.json" -Raw |
 機器人每分鐘檢查一次，最多可能晚 1 分鐘左右。
 
 **怎麼更新機器人？**
-有新版本時，在 `bot` 資料夾執行 `npx wrangler deploy` 就好，金鑰不用重設。
+有新版本時，在 `bot` 資料夾執行 `npx.cmd wrangler deploy` 就好，金鑰不用重設。
 
 **想換一個 Telegram 帳號連結？**
 在已經連結的聊天室傳 `/unlink`，再用新帳號傳 `/start`。

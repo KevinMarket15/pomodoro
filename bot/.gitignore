@@ -1,0 +1,3 @@
+# wrangler 的本機快取（含帳號名稱，不要上傳）
+.wrangler/
+node_modules/
