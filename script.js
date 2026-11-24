@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.24.2';
+const APP_VERSION = '2026.11.24.3';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -4143,7 +4143,8 @@ document.getElementById('etSave').addEventListener('click', () => { playTone('cl
  * 設定存在時長設定的 secretary（會同步）；朗讀與否存在這台裝置的 prefs.secVoice。
  * 網頁要還在執行才能關心你：電腦開著分頁可以，手機網頁在背景會被暫停，回到網頁時才會說話。 */
 // bot：聊天機器人（bot/worker.js）的主動訊息傳到哪裡：'telegram'、'off'（之後可能有 'discord'、'both'）
-const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00', bot: 'telegram' };
+// rest：休息多久後由聊天機器人來關心（分鐘，0＝不問；網頁不用）
+const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00', bot: 'telegram', rest: 30 };
 function secConf() {
     const raw = timerSettings.secretary && typeof timerSettings.secretary === 'object' ? timerSettings.secretary : {};
     const c = { ...SEC_DEFAULT, ...raw };
@@ -4154,6 +4155,7 @@ function secConf() {
         .filter(r => r[0] && r[1]).slice(0, 5);
     c.days = Array.isArray(c.days) ? c.days.filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : SEC_DEFAULT.days;
     c.idle = cleanInt(c.idle, 5, 600, 30);
+    c.rest = cleanInt(c.rest, 0, 600, 30);
     c.review = c.review === '' ? '' : (cleanTime(c.review) || '21:00');
     if (!['off', 'telegram', 'discord', 'both'].includes(c.bot)) c.bot = 'telegram';
     return c;
@@ -4184,7 +4186,8 @@ const SEC_LINES = {
         miniStop: ['有開始就很了不起，休息一下吧，做的時間都記下來了。'],
         rest: ['先休息一下吧。'],
         review: ['今天辛苦了！{stats}早點休息喔。'],
-        reviewNone: ['今天好像沒有計時，沒關係，明天再一起試試看。']
+        reviewNone: ['今天好像沒有計時，沒關係，明天再一起試試看。'],
+        care: ['已經休息 {min}了，還好嗎？準備好再慢慢回來就好～', '休息 {min}了喔，要不要回來做一點點？']
     },
     coach: {
         greet: ['來了！今天也一起衝吧！💪', '嘿！準備好了嗎？', '歡迎回來，戰士！'],
@@ -4198,7 +4201,8 @@ const SEC_LINES = {
         miniStop: ['OK！5 分鐘也是進步，記下來了！'],
         rest: ['喘口氣，等等再上！'],
         review: ['今日戰績：{stats}明天繼續加油！'],
-        reviewNone: ['今天還沒開張！明天拚回來！']
+        reviewNone: ['今天還沒開張！明天拚回來！'],
+        care: ['休息 {min}了！該回到戰場囉！', '已經休息 {min}，電應該充滿了吧？']
     },
     brief: {
         greet: ['歡迎回來。'],
@@ -4212,7 +4216,7 @@ const SEC_LINES = {
         miniStop: ['已記錄。'],
         rest: ['休息。'],
         review: ['今日：{stats}'],
-        reviewNone: ['今天沒有記錄。']
+        reviewNone: ['今天沒有記錄。'], care: ['已休息 {min}。']
     }
 };
 function secLine(kind, vars = {}) {
@@ -4460,6 +4464,7 @@ function renderSecSettings() {
     if (!c.ranges.length) list.appendChild(rewardEl('div', 'stats-empty', '還沒有時段，不會主動來問'));
     document.querySelectorAll('#secDays .seg-btn').forEach(b => b.classList.toggle('active', c.days.includes(Number(b.dataset.day))));
     document.getElementById('secIdle').value = c.idle;
+    document.getElementById('secRest').value = c.rest;
     document.querySelectorAll('#secTone .seg-btn').forEach(b => b.classList.toggle('active', b.dataset.v === c.tone));
     document.getElementById('secVoice').checked = !!prefs.secVoice;
     document.getElementById('secReviewOn').checked = !!c.review;
@@ -4488,6 +4493,7 @@ document.getElementById('secDays').addEventListener('click', (e) => {
     secEdit(c => { c.days = c.days.includes(d) ? c.days.filter(x => x !== d) : [...c.days, d].sort(); });
 });
 document.getElementById('secIdle').addEventListener('change', (e) => secEdit(c => { c.idle = cleanInt(e.target.value, 5, 600, 30); }));
+document.getElementById('secRest').addEventListener('change', (e) => secEdit(c => { c.rest = cleanInt(e.target.value, 0, 600, 30); }));
 document.getElementById('secTone').addEventListener('click', (e) => {
     const b = e.target.closest('.seg-btn'); if (!b) return;
     playTone('click'); secEdit(c => { c.tone = b.dataset.v; });

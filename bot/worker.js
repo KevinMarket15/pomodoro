@@ -229,7 +229,7 @@ function remindersOf(ctx) {
 }
 
 /* ---------- 秘書設定與語句（和 script.js 的 SEC_DEFAULT、SEC_LINES 一致） ---------- */
-const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00', bot: 'telegram' };
+const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00', bot: 'telegram', rest: 30 };
 function secConf(T) {
     const raw = T.secretary && typeof T.secretary === 'object' ? T.secretary : {};
     const c = { ...SEC_DEFAULT, ...raw };
@@ -240,6 +240,7 @@ function secConf(T) {
     c.ranges = (Array.isArray(c.ranges) ? c.ranges : []).map(r => Array.isArray(r) ? [cleanTime(r[0]), cleanTime(r[1])] : [null, null]).filter(r => r[0] && r[1]);
     c.days = Array.isArray(c.days) ? c.days.filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : SEC_DEFAULT.days;
     c.idle = cleanInt(c.idle, 5, 600, 30);
+    c.rest = cleanInt(c.rest, 0, 600, 30); // 休息多久來關心（0＝不問）
     c.review = c.review === '' ? '' : (cleanTime(c.review) || '21:00');
     return c;
 }
@@ -264,7 +265,8 @@ const SEC_LINES = {
         miniStop: ['有開始就很了不起，休息一下吧，做的時間都記下來了。'],
         rest: ['先休息一下吧。'],
         review: ['今天辛苦了！{stats}早點休息喔。'],
-        reviewNone: ['今天好像沒有計時，沒關係，明天再一起試試看。']
+        reviewNone: ['今天好像沒有計時，沒關係，明天再一起試試看。'],
+        care: ['已經休息 {min}了，還好嗎？準備好再慢慢回來就好～', '休息 {min}了喔，要不要回來做一點點？']
     },
     coach: {
         greet: ['來了！今天也一起衝吧！💪', '嘿！準備好了嗎？', '歡迎回來，戰士！'],
@@ -278,12 +280,13 @@ const SEC_LINES = {
         miniStop: ['OK！5 分鐘也是進步，記下來了！'],
         rest: ['喘口氣，等等再上！'],
         review: ['今日戰績：{stats}明天繼續加油！'],
-        reviewNone: ['今天還沒開張！明天拚回來！']
+        reviewNone: ['今天還沒開張！明天拚回來！'],
+        care: ['休息 {min}了！該回到戰場囉！', '已經休息 {min}，電應該充滿了吧？']
     },
     brief: {
         greet: ['歡迎回來。'], idle: ['一陣子沒計時了。'], next: ['休息結束。'], ask: ['下一件：「{task}」。'],
         none: ['要做什麼？'], resume: ['「{task}」暫停中。'], praise: ['完成。'], mini: ['5 分鐘到。繼續？'],
-        miniStop: ['已記錄。'], rest: ['休息。'], review: ['今日：{stats}'], reviewNone: ['今天沒有記錄。']
+        miniStop: ['已記錄。'], rest: ['休息。'], review: ['今日：{stats}'], reviewNone: ['今天沒有記錄。'], care: ['已休息 {min}。']
     }
 };
 function secLine(ctx, kind, vars = {}) {
@@ -425,7 +428,7 @@ function candidates(ctx) {
     return names.slice(0, 6);
 }
 async function prepSuggest(ctx) { await ctx.load('schedule', 'categories'); await ctx.loadLogs(2); }
-// kind：idle（一陣子沒計時）、next（休息結束）、ask（使用者說「開始」但沒說做什麼）
+// kind：idle（一陣子沒計時）、next（休息結束）、rest（休息太久）、ask（使用者說「開始」但沒說做什麼）
 function suggest(ctx, kind, opener) {
     const s = stateOf(ctx), bot = touchBot(ctx);
     const pre = opener ? `${opener} ` : '';
@@ -437,15 +440,16 @@ function suggest(ctx, kind, opener) {
     const cands = candidates(ctx);
     bot.cands = cands;
     if (!cands.length) {
-        ctx.say(`${pre}${secLine(ctx, 'none')}\n傳「開始 任務名稱」給我就會開始計時。`, kind === 'ask' ? null : [[['我在休息', 'snooze']]]);
+        ctx.say(`${pre}${secLine(ctx, 'none')}\n傳「開始 任務名稱」給我就會開始計時。`, kind === 'ask' ? null : [[snoozeBtn(kind)]]);
         return;
     }
     const rows = [[[`▶ 開始「${clip(cands[0])}」`, 'go:0'], ['只做 5 分鐘', 'mini:0']]];
     const others = cands.slice(1).map((n, i) => [clip(n, 14), `go:${i + 1}`]);
     for (let i = 0; i < others.length; i += 2) rows.push(others.slice(i, i + 2));
-    if (kind !== 'ask') rows.push([[kind === 'next' ? '再休息一下' : '我在休息', 'snooze']]);
+    if (kind !== 'ask') rows.push([snoozeBtn(kind)]);
     ctx.say(pre + secLine(ctx, 'ask', { task: cands[0] }) + (cands.length > 1 ? '\n或是選別的：' : ''), rows);
 }
+function snoozeBtn(kind) { return kind === 'rest' ? ['再休息一下', 'rsnz'] : [kind === 'next' ? '再休息一下' : '我在休息', 'snooze']; }
 // 「任務」：建議的任務＋任務庫的類別（點類別再列任務）
 function showTasks(ctx) {
     const bot = touchBot(ctx), cands = candidates(ctx), cats = categoriesOf(ctx);
@@ -728,7 +732,13 @@ async function onButton(ctx, data) {
         await prepSuggest(ctx); suggest(ctx, 'ask');
     } else if (cmd === 'snooze') {
         bot.snoozeUntil = ctx.now + secConf(timerConf(ctx)).idle * 60000;
+        if (bot.rest) bot.rest.at = Math.max(bot.rest.at || 0, bot.snoozeUntil); // 休息的關心也晚一點
         ctx.say('好，等等再來找你～');
+    } else if (cmd === 'rsnz') { // 休息太久的關心：再休息一下
+        const rest = secConf(timerConf(ctx)).rest || 30;
+        bot.snoozeUntil = Math.max(bot.snoozeUntil || 0, ctx.now + rest * 60000);
+        if (bot.rest && bot.rest.n < REST_MAX) { bot.rest.at = ctx.now + rest * 60000; ctx.say(`好，好好休息～ ${rest} 分鐘後再來看看你。`); }
+        else ctx.say('好，好好休息～');
     } else if (cmd === 'rs' || cmd === 'ra') {
         await ctx.load('reminders', 'categories');
         const rem = remindersOf(ctx).find(r => r.id === a);
@@ -773,6 +783,25 @@ async function onButton(ctx, data) {
 }
 
 /* ---------- 每分鐘的檢查（網頁關著時由這裡負責） ---------- */
+/* ---------- 休息太久的關心 ---------- */
+const REST_MAX = 3; // 一段休息最多關心幾次
+// 記下這段休息從什麼時候開始（bot.rest = {from, n：已關心幾次, at：下次最早幾點}）：
+// 休息中＝那一段的開始；輪到休息還沒開始＝專注結束的時候；休息結束後還沒開始做事就沿用；開始專注就清掉
+function trackRest(ctx) {
+    const s = stateOf(ctx), se = s.session, bot = botOf(ctx);
+    const old = bot.rest ? bot.rest.from : null;
+    let from = old;
+    if (se) from = se.mode === 'focus' ? null : se.start;
+    else if (s.mode !== 'focus') from = s.rev || ctx.now; // 輪到休息＝剛做完一段專注，rev 是那時候
+    if (from !== old) touchBot(ctx).rest = from ? { from, n: 0 } : null;
+}
+// 正數休息時已經問過「還在休息嗎」：算一次關心，下次延後
+function restAsked(ctx, c) {
+    trackRest(ctx);
+    const r = touchBot(ctx).rest;
+    if (r && c.rest) { r.n = Math.min(REST_MAX, r.n + 1); r.at = ctx.now + c.rest * 60000; }
+}
+
 async function tick(ctx) {
     await ctx.load('state', 'timer', 'reminders', 'bot');
     const bot = botOf(ctx);
@@ -783,6 +812,7 @@ async function tick(ctx) {
     let spoke = false;
     const fired = bot.fired && bot.fired.date === today ? bot.fired : { date: today, ids: [] };
     const fire = id => { if (fired.ids.includes(id)) return false; fired.ids.push(id); touchBot(ctx).fired = fired; return true; };
+    trackRest(ctx); // 先記下現在這一段（下面可能會把它結束掉）
 
     // 1. 倒數時間到
     if (s.isRunning && !isCountUp(ctx) && s.endTime && s.endTime <= now) {
@@ -821,6 +851,7 @@ async function tick(ctx) {
                 const opts = [['結束，算到現在', 'cu:0']];
                 [30, 60].forEach(n => { const t = now - n * 60000; if (t >= from) opts.push([`算到 ${hm(t)}`, `cu:${Math.floor(t / 60000)}`]); });
                 ctx.say(`⏱ 已經${focus ? '專注' : '休息'} ${durationText(sec)}了，還在${focus ? '做' : '休息'}嗎？`, [[['還在', 'still']], opts]);
+                if (!focus) restAsked(ctx, c); // 已經問過休息的事，關心延後一輪
             }
         }
     }
@@ -845,6 +876,7 @@ async function tick(ctx) {
             ctx.say(`${n ? `💸 今天記了 ${n} 筆支出，還有漏記的嗎？` : '💸 今天有花錢嗎？記一下吧'}\n直接傳「金額 用途」給我就能記，例如：120 午餐`);
         }
     }
+    trackRest(ctx);
     if (!c.on || !send) return;
     // 6. 晚上的回顧
     if (c.review && now >= localTime(today, c.review) && !fired.ids.includes('__review')) {
@@ -856,8 +888,20 @@ async function tick(ctx) {
             spoke = true;
         }
     }
-    // 7. 一陣子沒計時：建議做什麼。沒回應的話下次隔久一點（最多 4 小時）
-    if (spoke || c.when === 'open' || stateOf(ctx).isRunning || now < (bot.snoozeUntil || 0) || !secInHours(c, now)) return;
+    if (spoke || c.when === 'open' || !secInHours(c, now)) return;
+    // 7. 休息太久：從休息開始每隔 c.rest 分鐘關心一次，最多 REST_MAX 次（按「再休息一下」等按鈕會延後 rest.at）
+    const r = bot.rest;
+    if (c.rest && r && r.n < REST_MAX && now >= Math.max(r.from + c.rest * 60000 * (r.n + 1), r.at || 0)) {
+        const b = touchBot(ctx);
+        if (now - r.from > c.rest * 60000 * (REST_MAX + 1)) { b.rest.n = REST_MAX; return; } // 錯過太久（例如時段外）就不補問
+        b.rest.n++; b.rest.at = now + c.rest * 60000;
+        b.lastNudge = now; b.snoozeUntil = b.rest.at; // 下面的「一陣子沒計時」不要緊接著再問
+        await prepSuggest(ctx);
+        suggest(ctx, 'rest', secLine(ctx, 'care', { min: durationText((now - r.from) / 1000) }));
+        return;
+    }
+    // 8. 一陣子沒計時：建議做什麼。沒回應的話下次隔久一點（最多 4 小時）
+    if (stateOf(ctx).isRunning || now < (bot.snoozeUntil || 0)) return;
     const st = stateOf(ctx);
     const lastActive = Math.max(st.rev || 0, (st.session && st.session.lastActive) || 0, bot.lastActive || 0);
     if (now - lastActive < c.idle * 60000) return;
