@@ -229,7 +229,7 @@ function remindersOf(ctx) {
 }
 
 /* ---------- 秘書設定與語句（和 script.js 的 SEC_DEFAULT、SEC_LINES 一致） ---------- */
-const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00', bot: 'telegram', rest: 30 };
+const SEC_DEFAULT = { on: true, when: 'hours', ranges: [['09:00', '22:00']], days: [0, 1, 2, 3, 4, 5, 6], idle: 30, tone: 'gentle', review: '21:00', bot: 'telegram', rest: 30, cheer: 30 };
 function secConf(T) {
     const raw = T.secretary && typeof T.secretary === 'object' ? T.secretary : {};
     const c = { ...SEC_DEFAULT, ...raw };
@@ -241,6 +241,7 @@ function secConf(T) {
     c.days = Array.isArray(c.days) ? c.days.filter(d => Number.isInteger(d) && d >= 0 && d <= 6) : SEC_DEFAULT.days;
     c.idle = cleanInt(c.idle, 5, 600, 30);
     c.rest = cleanInt(c.rest, 0, 600, 30); // 休息多久來關心（0＝不問）
+    c.cheer = cleanInt(c.cheer, 0, 600, 30); // 專注多久鼓勵並問在不在（0＝不問）
     c.review = c.review === '' ? '' : (cleanTime(c.review) || '21:00');
     return c;
 }
@@ -266,7 +267,9 @@ const SEC_LINES = {
         rest: ['先休息一下吧。'],
         review: ['今天辛苦了！{stats}早點休息喔。'],
         reviewNone: ['今天好像沒有計時，沒關係，明天再一起試試看。'],
-        care: ['已經休息 {min}了，還好嗎？準備好再慢慢回來就好～', '休息 {min}了喔，要不要回來做一點點？']
+        care: ['已經休息 {min}了，還好嗎？準備好再慢慢回來就好～', '休息 {min}了喔，要不要回來做一點點？'],
+        cheer: ['好專心～已經專注 {min}了！', '已經做了 {min}，你真的很棒！'],
+        keep: ['你真的很努力！', '好認真，辛苦了～']
     },
     coach: {
         greet: ['來了！今天也一起衝吧！💪', '嘿！準備好了嗎？', '歡迎回來，戰士！'],
@@ -281,12 +284,14 @@ const SEC_LINES = {
         rest: ['喘口氣，等等再上！'],
         review: ['今日戰績：{stats}明天繼續加油！'],
         reviewNone: ['今天還沒開張！明天拚回來！'],
-        care: ['休息 {min}了！該回到戰場囉！', '已經休息 {min}，電應該充滿了吧？']
+        care: ['休息 {min}了！該回到戰場囉！', '已經休息 {min}，電應該充滿了吧？'],
+        cheer: ['{min}了！狀態超好，繼續衝！🔥', '已經撐 {min}，太強了！'],
+        keep: ['耐力驚人！💪', '太猛了！']
     },
     brief: {
         greet: ['歡迎回來。'], idle: ['一陣子沒計時了。'], next: ['休息結束。'], ask: ['下一件：「{task}」。'],
         none: ['要做什麼？'], resume: ['「{task}」暫停中。'], praise: ['完成。'], mini: ['5 分鐘到。繼續？'],
-        miniStop: ['已記錄。'], rest: ['休息。'], review: ['今日：{stats}'], reviewNone: ['今天沒有記錄。'], care: ['已休息 {min}。']
+        miniStop: ['已記錄。'], rest: ['休息。'], review: ['今日：{stats}'], reviewNone: ['今天沒有記錄。'], care: ['已休息 {min}。'], cheer: ['已專注 {min}。'], keep: ['']
     }
 };
 function secLine(ctx, kind, vars = {}) {
@@ -873,8 +878,22 @@ async function tick(ctx) {
                 // 按鈕上寫幾點就算到幾點（cu:分鐘數時間戳；0＝按下的時候）
                 const opts = [['結束，算到現在', 'cu:0']];
                 [30, 60].forEach(n => { const t = now - n * 60000; if (t >= from) opts.push([`算到 ${hm(t)}`, `cu:${Math.floor(t / 60000)}`]); });
-                ctx.say(`⏱ 已經${focus ? '專注' : '休息'} ${durationText(sec)}了，還在${focus ? '做' : '休息'}嗎？`, [[['還在', 'still']], opts]);
+                const keep = focus && c.on ? secLine(ctx, 'keep') : '';
+                ctx.say(`⏱ ${keep ? `${keep}` : ''}已經${focus ? '專注' : '休息'} ${durationText(sec)}了，還在${focus ? '做' : '休息'}嗎？`,
+                    [[['還在', 'still'], ['先暫停', 'pause']], opts]);
                 if (!focus) restAsked(ctx, c); // 已經問過休息的事，關心延後一輪
+            }
+        }
+    }
+    // 3b. 專注中：每 c.cheer 分鐘鼓勵一下、問還在不在（正數到了上面「還在做嗎」的時間，就只問那一則）
+    const sc = stateOf(ctx).session;
+    if (c.on && c.cheer && !spoke && sc && sc.mode === 'focus' && stateOf(ctx).isRunning) {
+        const min = Math.floor(liveActiveSec(stateOf(ctx), now) / 60), k = Math.floor(min / c.cheer);
+        if (k >= 1 && k > (sc.cheered || 0)) {
+            sc.cheered = k; saveState(ctx);
+            if (send && !(first && sc.countUp && min >= first)) {
+                spoke = true;
+                ctx.say(`💪 ${secLine(ctx, 'cheer', { min: durationText(k * c.cheer * 60) })}還在嗎？`, [[['還在', 'still'], ['先暫停', 'pause'], ['結束', 'end']]]);
             }
         }
     }
