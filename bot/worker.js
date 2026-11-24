@@ -818,8 +818,10 @@ async function tick(ctx) {
 }
 
 /* ---------- Telegram ---------- */
+// 權杖前後多貼的空白、換行不算
+function tgToken(env) { return String(env.TELEGRAM_TOKEN || '').trim(); }
 async function tg(env, method, body) {
-    const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_TOKEN}/${method}`, {
+    const res = await fetch(`https://api.telegram.org/bot${tgToken(env)}/${method}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
     });
     const j = await res.json().catch(() => ({}));
@@ -835,7 +837,7 @@ async function sendAll(env, chat, msgs) {
     for (const m of msgs) await tg(env, 'sendMessage', { chat_id: chat, text: m.text, reply_markup: tgMarkup(m) });
 }
 async function webhookSecret(env) {
-    const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`pomodoro-webhook:${env.TELEGRAM_TOKEN}`));
+    const h = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`pomodoro-webhook:${tgToken(env)}`));
     return [...new Uint8Array(h)].slice(0, 24).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
@@ -909,7 +911,7 @@ async function setupPage(env, origin) {
         } catch (err) { ok(false, `讀不到 Firebase：${String(err.message).replace(/[<>&]/g, '')}`); }
         const me = await tg(env, 'getMe', {});
         botName = me.ok ? me.result.username : '';
-        ok(!!botName, botName ? `Telegram 機器人 @${botName}` : 'TELEGRAM_TOKEN 不對');
+        ok(!!botName, botName ? `Telegram 機器人 @${botName}` : `TELEGRAM_TOKEN 不對（Telegram 回覆：${String(me.description || me.error_code || '沒有回應').replace(/[<>&]/g, '')}；權杖長得像 1234567890:AAH…，中間有冒號）`);
         if (botName) {
             const wh = await tg(env, 'setWebhook', { url: `${origin}/telegram`, secret_token: await webhookSecret(env), allowed_updates: ['message', 'callback_query'] });
             ok(!!wh.ok, wh.ok ? '已設定好接收 Telegram 訊息' : '設定接收訊息失敗');
