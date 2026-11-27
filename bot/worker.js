@@ -29,7 +29,7 @@ const DOCS = {
     state: 'kv/state', timer: 'kv/timer', schedule: 'kv/schedule', categories: 'kv/categories',
     rewards: 'kv/rewards', reminders: 'kv/reminders', done: 'kv/done', bot: 'bot/state'
 };
-const KEYBOARD = { keyboard: [[{ text: '開始' }, { text: '暫停' }, { text: '結束' }], [{ text: '任務' }, { text: '狀態' }, { text: '今天' }, { text: '說明' }]], resize_keyboard: true, is_persistent: true };
+const KEYBOARD = { keyboard: [[{ text: '開始' }, { text: '暫停' }, { text: '結束' }], [{ text: '任務' }, { text: '狀態' }, { text: '今天' }, { text: '記錄' }, { text: '說明' }]], resize_keyboard: true, is_persistent: true };
 
 /* ---------- 時間（依使用者的時區，不是伺服器的 UTC） ---------- */
 let ZONE = 'Asia/Taipei';
@@ -134,6 +134,20 @@ class Store {
         const j = await this.call(`${this.user}:runQuery`, { structuredQuery: {
             from: [{ collectionId: 'logs' }],
             where: { fieldFilter: { field: { fieldPath: '__name__' }, op: 'GREATER_THAN_OR_EQUAL', value: { referenceValue: `${this.user}/logs/${since}` } } }
+        } });
+        const logs = [];
+        j.forEach(r => {
+            if (!r.document || !r.document.fields || !r.document.fields.value) return;
+            try { logs.push(JSON.parse(r.document.fields.value.stringValue)); } catch (err) {}
+        });
+        return logs;
+    }
+    // 開始時間在 [since, until) 之間的時間記錄
+    async logsBetween(since, until) {
+        const ref = (op, v) => ({ fieldFilter: { field: { fieldPath: '__name__' }, op, value: { referenceValue: `${this.user}/logs/${v}` } } });
+        const j = await this.call(`${this.user}:runQuery`, { structuredQuery: {
+            from: [{ collectionId: 'logs' }],
+            where: { compositeFilter: { op: 'AND', filters: [ref('GREATER_THAN_OR_EQUAL', since), ref('LESS_THAN', until)] } }
         } });
         const logs = [];
         j.forEach(r => {
@@ -528,6 +542,128 @@ function statsText(st) {
     return p.length ? p.join('、') + '。' : '';
 }
 
+/* ---------- 查記錄（時間記錄、完成的任務、支出；和網頁一樣保留一年） ---------- */
+const DOW_ZH = ['日', '一', '二', '三', '四', '五', '六'];
+function md(date) { const [, m, d] = date.split('-').map(Number); return `${m}/${d}（${DOW_ZH[dowOf(date)]}）`; }
+function weekStart(date) { return addDays(date, -((dowOf(date) + 6) % 7)); } // 週一開始
+function earliestLogDate(ctx) { return addDays(dateKey(ctx.now), -365); }
+// 「昨天」「前天」「3天前」「11/25」「11月25日」「2026-11-25」；空白＝今天
+function parseLogDate(q, today) {
+    if (!q || /^(今天|today)$/i.test(q)) return today;
+    if (/^(昨天|昨日|yesterday)$/i.test(q)) return addDays(today, -1);
+    if (/^前天$/.test(q)) return addDays(today, -2);
+    let m = q.match(/^(\d{1,3})\s*天前$/);
+    if (m) return addDays(today, -Number(m[1]));
+    m = q.match(/^(?:(\d{4})\s*[-\/.年]\s*)?(\d{1,2})\s*[-\/.月]\s*(\d{1,2})\s*[日號号]?$/);
+    if (!m) return null;
+    const mo = Number(m[2]), d = Number(m[3]);
+    if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    const pad = n => String(n).padStart(2, '0');
+    const y = m[1] ? Number(m[1]) : Number(today.slice(0, 4));
+    let date = `${y}-${pad(mo)}-${pad(d)}`;
+    if (addDays(date, 0) !== date) return null; // 2/30 之類不存在的日子
+    if (!m[1] && date > today) date = `${y - 1}-${pad(mo)}-${pad(d)}`; // 沒寫年份又在未來：當成去年
+    return date;
+}
+// 開始時間在 from 那天 00:00 到 to 那天結束之間的記錄（含這次剛寫入、還沒存的）
+async function logsOfDays(ctx, from, to) {
+    const since = localTime(from, '00:00'), until = localTime(addDays(to, 1), '00:00');
+    const logs = await ctx.db.logsBetween(String(since), String(until));
+    const seen = new Set(logs.map(l => `${l.start}_${l.mode}`));
+    ctx.newLogs.forEach(l => { if (l.start >= since && l.start < until && !seen.has(`${l.start}_${l.mode}`)) logs.push(l); });
+    return logs.filter(l => l && Number.isFinite(l.start)).sort((a, b) => a.start - b.start);
+}
+function doneByDate(ctx) { // 日期 → 那天完成的任務名稱
+    const by = {}, ids = new Set();
+    const add = (id, name, at) => { if (!Number.isFinite(at) || ids.has(id)) return; ids.add(id); (by[dateKey(at)] = by[dateKey(at)] || []).push(name || '（沒有名稱）'); };
+    (Array.isArray(ctx.get('done')) ? ctx.get('done') : []).forEach(d => d && add(d.id, d.name, d.at));
+    scheduleOf(ctx).forEach(t => { if (t.done) add(t.id, t.name, t.doneAt); });
+    return by;
+}
+function expensesOn(r, date) { return r.expenses.filter(x => Number.isFinite(x.at) && dateKey(x.at) === date).sort((a, b) => a.at - b.at); }
+function navRow(prev, next) { return [prev, next].filter(Boolean); }
+async function showDay(ctx, date) {
+    const today = dateKey(ctx.now), first = earliestLogDate(ctx);
+    if (date > today) { ctx.say('那天還沒到喔 😄'); return; }
+    if (date < first) { ctx.say('記錄只保留一年，更早的查不到了。'); return; }
+    await ctx.load('done', 'rewards');
+    // 前一天開始、跨過午夜的那段也要算進這天的蕃茄（和網頁一樣，蕃茄看結束時間、分鐘看開始時間）
+    const logs = await logsOfDays(ctx, addDays(date, -1), date);
+    const focus = logs.filter(l => l.mode === 'focus');
+    let sec = 0, pomo = 0;
+    focus.forEach(l => { if (dateKey(l.start) === date) sec += l.actualSec || 0; if (dateKey(l.end) === date) pomo += pomodorosOf(l); });
+    // 前一天開始、這天才結束而且有蕃茄的那段也列出來，清單才對得上總數
+    const lines = focus.filter(l => dateKey(l.start) === date || (dateKey(l.end) === date && pomodorosOf(l))).map(l => {
+        const p = pomodorosOf(l), tags = [], before = dateKey(l.start) !== date;
+        if (l.manual) tags.push('補登');
+        else if (!l.countUp && !l.completed) tags.push('中斷');
+        if (before) tags.push('分鐘算前一天');
+        else if (p && dateKey(l.end) !== date) tags.push('蕃茄算隔天');
+        return `${before ? '前一天 ' : ''}${hm(l.start)}–${hm(l.end)} ${clip(l.task || '未指定任務', 20)} ${Math.round((l.actualSec || 0) / 60)} 分${p ? ' ' + (p > 1 ? `🍅×${p}` : '🍅') : ''}${tags.length ? `（${tags.join('、')}）` : ''}`;
+    });
+    const s = stateOf(ctx);
+    if (s.session && s.session.mode === 'focus' && dateKey(s.session.start) === date) {
+        const live = liveActiveSec(s, ctx.now);
+        sec += live;
+        lines.push(`${hm(s.session.start)}– ${clip(s.session.task || '未指定任務', 20)} 已 ${Math.round(live / 60)} 分（${s.isRunning ? '進行中' : '暫停中'}）`);
+    }
+    const done = doneByDate(ctx)[date] || [];
+    const r = rewardsOf(ctx), accounts = accountsOf(r), ex = expensesOn(r, date);
+    const more = (list, n, unit) => (list.length > n ? [`……還有 ${list.length - n} ${unit}`] : []);
+    const out = [`📅 ${md(date)}${date === today ? '今天' : ''}的記錄`];
+    const sum = statsText({ sec, pomo, done: done.length });
+    out.push(sum ? `🍅 ${sum}` : '這天沒有專注記錄。');
+    if (lines.length) out.push('', '⏱ 專注', ...lines.slice(0, 60), ...more(lines, 60, '段'));
+    if (done.length) out.push('', '✅ 完成的任務', ...done.slice(0, 40).map(n => `・${clip(n, 30)}`), ...more(done, 40, '項'));
+    if (ex.length) {
+        out.push('', `💸 支出 共 ${money(ex.reduce((a, x) => a + (x.amount || 0), 0))}`);
+        ex.slice(0, 40).forEach(x => { const acc = accounts.find(a => a.id === x.acc); out.push(`・${hm(x.at)} ${clip(x.name || '', 20)} ${money(x.amount || 0)}${acc ? `（${clip(acc.name, 8)}）` : ''}`); });
+        out.push(...more(ex, 40, '筆'));
+    }
+    const prev = addDays(date, -1), next = addDays(date, 1);
+    ctx.say(out.join('\n'), [
+        navRow(prev >= first && ['◀ 前一天', `lg:${prev}`], next <= today && ['後一天 ▶', `lg:${next}`]),
+        [['這一週', `lw:${date}`]]
+    ].filter(row => row.length));
+}
+async function showWeek(ctx, mon) {
+    const today = dateKey(ctx.now), first = earliestLogDate(ctx), sun = addDays(mon, 6);
+    if (mon > today) { ctx.say('那週還沒到喔 😄'); return; }
+    if (sun < first) { ctx.say('記錄只保留一年，更早的查不到了。'); return; }
+    await ctx.load('done', 'rewards');
+    const logs = await logsOfDays(ctx, addDays(mon, -1), sun);
+    const done = doneByDate(ctx), r = rewardsOf(ctx), s = stateOf(ctx);
+    const out = [`📅 ${md(mon)} ～ ${md(sun)} 這週的記錄`, ''];
+    let tSec = 0, tPomo = 0, tDone = 0, tSpent = 0;
+    const dayBtns = [];
+    for (let i = 0; i < 7; i++) {
+        const d = addDays(mon, i);
+        if (d > today) break;
+        let sec = 0, pomo = 0;
+        logs.forEach(l => { if (l.mode !== 'focus') return; if (dateKey(l.start) === d) sec += l.actualSec || 0; if (dateKey(l.end) === d) pomo += pomodorosOf(l); });
+        if (s.session && s.session.mode === 'focus' && dateKey(s.session.start) === d) sec += liveActiveSec(s, ctx.now);
+        const nDone = (done[d] || []).length;
+        const spent = expensesOn(r, d).reduce((a, x) => a + (x.amount || 0), 0);
+        tSec += sec; tPomo += pomo; tDone += nDone; tSpent += spent;
+        const p = [];
+        if (sec) p.push(`${Math.round(sec / 60)} 分`);
+        if (pomo) p.push(`🍅${pomo}`);
+        if (nDone) p.push(`✓${nDone}`);
+        if (spent) p.push(`💸${money(spent)}`);
+        out.push(`${md(d)}${d === today ? '今天' : ''}　${p.length ? p.join('　') : '—'}`);
+        if (d >= first) dayBtns.push([DOW_ZH[dowOf(d)], `lg:${d}`]);
+    }
+    const sum = statsText({ sec: tSec, pomo: tPomo, done: tDone });
+    out.push('', sum ? `合計：${sum}` : '這週沒有專注記錄。');
+    if (tSpent) out.push(`💸 支出共 ${money(tSpent)}`);
+    if (dayBtns.length) out.push('', '點下面的星期幾，看那天的逐筆記錄。');
+    const prev = addDays(mon, -7), next = addDays(mon, 7);
+    ctx.say(out.join('\n'), [
+        dayBtns,
+        navRow(addDays(prev, 6) >= first && ['◀ 上一週', `lw:${prev}`], next <= today && ['下一週 ▶', `lw:${next}`])
+    ].filter(row => row.length));
+}
+
 /* ---------- 記帳（格式和 script.js 的獎勵資料一致） ---------- */
 function parseExpense(text) {
     const t = String(text || '').trim();
@@ -602,6 +738,7 @@ const HELP = [
     '・在看直播：把「看直播」排進任務條（開頭打「在」）',
     '・狀態：現在在做什麼',
     '・今天：今天的成績',
+    '・記錄：今天的逐筆記錄（也可以「記錄 昨天」「記錄 11/25」「記錄 本週」「記錄 上週」）',
     '',
     '網頁關著的時候，我也會在你設定的時段來關心你、提醒計時結束和定時提醒。'
 ].join('\n');
@@ -683,7 +820,7 @@ function startBreak(ctx) {
 }
 
 async function onText(ctx, text) {
-    const t = text.trim().replace(/^\/(\w+)(@\w+)?/, (m, c) => ({ help: '說明', status: '狀態', today: '今天', pause: '暫停', resume: '繼續', stop: '結束', focus: '開始', rest: '休息', tasks: '任務' }[c] || m));
+    const t = text.trim().replace(/^\/(\w+)(@\w+)?/, (m, c) => ({ help: '說明', status: '狀態', today: '今天', pause: '暫停', resume: '繼續', stop: '結束', focus: '開始', rest: '休息', tasks: '任務', log: '記錄' }[c] || m));
     let m;
     if (/^(說明|幫助|help|\?|？)$/i.test(t)) { ctx.say(HELP, null, { keyboard: true }); return; }
     if ((m = t.match(/^開始\s*(.*)$/s))) {
@@ -709,6 +846,16 @@ async function onText(ctx, text) {
         const ex = r.expenses.filter(x => Number.isFinite(x.at) && dateKey(x.at) === today);
         const spent = ex.length ? `\n💸 今天記了 ${ex.length} 筆支出，共 ${money(ex.reduce((a, x) => a + (x.amount || 0), 0))}。` : '';
         ctx.say((statsText(st) ? `今天：${statsText(st)}` : '今天還沒有專注記錄。') + spent);
+        return;
+    }
+    if ((m = t.match(/^(?:記錄|紀錄|log)(?:\s+|$)(.*)$/is))) {
+        const q = m[1].trim(), today = dateKey(ctx.now);
+        await prepTimer(ctx); catchUp(ctx);
+        if (/^(本週|本周|這週|這周|這禮拜|week)$/i.test(q)) { await showWeek(ctx, weekStart(today)); return; }
+        if (/^(上週|上周|上禮拜)$/.test(q)) { await showWeek(ctx, addDays(weekStart(today), -7)); return; }
+        const date = parseLogDate(q, today);
+        if (!date) { ctx.say('看不懂是哪一天 😅 可以傳「記錄」「記錄 昨天」「記錄 11/25」「記錄 本週」。'); return; }
+        await showDay(ctx, date);
         return;
     }
     // 「在看直播」「正在看直播」：把「看直播」排進任務條（開頭的「在」就是記號，所以比記帳先判斷）
@@ -792,6 +939,10 @@ async function onButton(ctx, data) {
         if (cmd === 'pa') { await ctx.load('categories'); addToTaskBar(ctx, bot.pick); }
         else startFocus(ctx, bot.pick, cmd === 'pm');
     } else if (cmd === 'pu') undoAdd(ctx);
+    else if (cmd === 'lg' || cmd === 'lw') {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(a || '')) { ctx.say('這個按鈕已經過期了，傳「記錄」再看一次。'); return; }
+        if (cmd === 'lg') await showDay(ctx, a); else await showWeek(ctx, weekStart(a));
+    }
     else if (cmd === 'ea' || cmd === 'ex') {
         await ctx.load('rewards');
         const r = rewardsOf(ctx), x = r.expenses.find(e => e.id === a);
