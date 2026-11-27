@@ -596,7 +596,33 @@
             <div class="data-actions">
                 <button class="action-btn export" id="mlSave">補登</button>
             </div>
-            <div class="setting-note">補登的專注和計時一樣算蕃茄與獎勵點數，記錄上會標示「補登」，可以在時間記錄裡修改任務名稱或刪除。補今天的任務時，今日行程上還沒完成的同名卡片會一起推進進度。</div>
+            <div class="setting-note">補登的專注和計時一樣算蕃茄與獎勵點數，記錄上會標示「補登」，可以在時間記錄裡修改時間、任務名稱或刪除。補今天的任務時，今日行程上還沒完成的同名卡片會一起推進進度。</div>
+        </div>
+    </div>
+</div>
+
+<div class="modal-overlay" id="logEditModal">
+    <div class="modal-content">
+        <button class="modal-close">×</button>
+        <div class="modal-section">
+            <div class="modal-title" id="leTitle">修改記錄</div>
+            <div class="setting-row">
+                <span class="setting-label">做什麼</span>
+                <input type="text" class="text-input" id="leTask" maxlength="100" list="remTaskList" placeholder="任務名稱">
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">開始</span>
+                <input type="time" class="text-input rw-num" id="leStart" aria-label="開始時間">
+            </div>
+            <div class="setting-row">
+                <span class="setting-label">結束<small id="leNote"></small></span>
+                <input type="time" class="text-input rw-num" id="leEnd" aria-label="結束時間">
+            </div>
+            <div class="rw-msg bad" id="leMsg" role="status"></div>
+            <div class="data-actions">
+                <button class="action-btn export" id="leSave">儲存</button>
+            </div>
+            <div class="setting-note">改了時間，分鐘數和蕃茄會照正數的規則重算（中間暫停的時間不變；每滿一段專注時長一顆）。任務條卡片的進度不會跟著改；7 天前的獎勵點數已經結算，也不會變。</div>
         </div>
     </div>
 </div>
@@ -679,7 +705,7 @@
                 <li><strong>獎勵：</strong>按右上角 🎁 或計時器下方的 ⭐。完成蕃茄後依任務類別與專注分鐘數賺點數（可以自己調整每個類別每 15 分鐘幾點），用點數在商店兌換你自己設定的獎勵，例如「玩 30 分鐘手遊」；也可以把星星存進自己設定的帳戶（娛樂、購物…）換成錢，吃飯這類必要帳戶可以設每月底薪；花錢時記一筆支出（可以透支），帳戶之間也能轉帳。累計的點數越多等級越高。</li>
                 <li><strong>AI 助理：</strong>右上角 🤖。勾選想請 AI 做的事（排行程、今日檢討、週回顧、月回顧）後複製，貼到你常用的 AI；AI 排好的行程貼回來就會排進今日行程。也可以把資料存到 Google 雲端硬碟，讓有連接雲端硬碟的 AI 直接讀取。</li>
                 <li><strong>統計與設定：</strong>右上角 📊 看每週的專注時間、任務排行與每天完成了哪些任務；⚙ 可以切換深色模式、調整提示音、長休息間隔、自動開始下一段與常駐通知。手機上這些按鈕收在右上角的 ☰ 裡。</li>
-                <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改，按右邊的 ✕ 可以刪掉那一筆。</li>
+                <li><strong>修改記錄：</strong>在「時間記錄」裡點任務名稱可以改名；點專注的時間可以改開始／結束時間（分鐘和蕃茄照正數規則重算，中間暫停的時間不變）；按右邊的 ✕ 可以刪掉那一筆。聊天機器人傳「記錄」後按「✏️ 修改記錄」也能改。</li>
             </ul>
         </div>
         <div class="modal-section">

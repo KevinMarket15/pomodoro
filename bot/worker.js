@@ -162,7 +162,7 @@ class Store {
 /* 一次處理的工作區：讀進來的文件、要寫回的變動、要送出的訊息。
  * 全部寫入成功後才送訊息；寫入時發現資料被網頁先改了，就整個重做一次。 */
 class Ctx {
-    constructor(db, now) { this.db = db; this.now = now; this.docs = {}; this.dirty = new Set(); this.newLogs = []; this.logs = null; this.out = []; }
+    constructor(db, now) { this.db = db; this.now = now; this.docs = {}; this.dirty = new Set(); this.newLogs = []; this.delLogs = new Set(); this.logs = null; this.out = []; }
     async load(...names) {
         const need = names.filter(n => !(n in this.docs));
         if (!need.length) return;
@@ -196,6 +196,7 @@ class Ctx {
                 currentDocument: d.updateTime ? { updateTime: d.updateTime } : { exists: false }
             });
         });
+        this.delLogs.forEach(id => writes.push({ delete: `${this.db.user}/logs/${id}` }));
         this.newLogs.forEach(l => writes.push({ update: { name: `${this.db.user}/logs/${l.start}_${l.mode}`, fields: { value: { stringValue: JSON.stringify(l) } } } }));
         await this.db.commit(writes);
     }
@@ -623,7 +624,7 @@ async function showDay(ctx, date) {
     const prev = addDays(date, -1), next = addDays(date, 1);
     ctx.say(out.join('\n'), [
         navRow(prev >= first && ['◀ 前一天', `lg:${prev}`], next <= today && ['後一天 ▶', `lg:${next}`]),
-        [['這一週', `lw:${date}`]]
+        [['這一週', `lw:${date}`], ...(editable(ctx, logs, date).length ? [['✏️ 修改記錄', `lx:${date}`]] : [])]
     ].filter(row => row.length));
 }
 async function showWeek(ctx, mon) {
@@ -662,6 +663,92 @@ async function showWeek(ctx, mon) {
         dayBtns,
         navRow(addDays(prev, 6) >= first && ['◀ 上一週', `lw:${prev}`], next <= today && ['下一週 ▶', `lw:${next}`])
     ].filter(row => row.length));
+}
+
+/* ---------- 修改時間記錄（規則和 script.js 的 retimeLog、saveLogEdit 一樣） ---------- */
+// 「15:30」「15：30」「3點半」「15點20分」→ 'HH:MM'
+function parseClock(q) {
+    let m = String(q).trim().match(/^(\d{1,2})\s*[:：]\s*(\d{2})$/) || String(q).trim().match(/^(\d{1,2})\s*[點点時时]\s*(?:(\d{1,2})\s*分?|(半))?$/);
+    if (!m) return null;
+    const h = Number(m[1]), mi = m[3] ? 30 : Number(m[2] || 0);
+    if (h > 23 || mi > 59) return null;
+    return `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
+}
+// 改了開始／結束時間：中間暫停的時間保留，蕃茄照正數規則重算（每滿一段專注時長一顆）
+function retimeLog(l, start, end, focusSec) {
+    const span = Math.round((end - start) / 1000);
+    const actualSec = Math.max(0, Math.min(span, Math.round((l.actualSec || 0) + (l.start - start) / 1000 + (end - l.end) / 1000)));
+    const out = { ...l, start, end, actualSec, completed: true, countUp: true };
+    out.pomodoros = actualSec >= MIN_POMODORO_SEC ? Math.floor(actualSec / Math.max(MIN_POMODORO_SEC, focusSec)) : 0;
+    if (!l.countUp) out.plannedSec = actualSec;
+    return out;
+}
+function logLine(l) {
+    const p = pomodorosOf(l);
+    return `${dateKey(l.start).slice(5).replace('-', '/')} ${hm(l.start)}–${hm(l.end)} ${clip(l.task || '未指定任務', 20)} ${Math.round((l.actualSec || 0) / 60)} 分${p ? ` 🍅${p > 1 ? '×' + p : ''}` : ''}`;
+}
+function editable(ctx, logs, date) { return logs.filter(l => l.mode === 'focus' && dateKey(l.start) === date && l.start >= ctx.now - 365 * DAY_MS); }
+async function logById(ctx, start) {
+    if (!Number.isFinite(start)) return null;
+    const got = await ctx.db.getMany([`logs/${start}_focus`]);
+    const d = got[`logs/${start}_focus`];
+    try { return d && d.value ? JSON.parse(d.value) : null; } catch (err) { return null; }
+}
+async function showEditList(ctx, date) {
+    const logs = editable(ctx, await logsOfDays(ctx, date, date), date).slice(0, 30);
+    if (!logs.length) { ctx.say('這天沒有可以修改的專注記錄。'); return; }
+    ctx.say(`${md(date)}：要改哪一筆？`, logs.map(l => [[`${hm(l.start)}–${hm(l.end)} ${clip(l.task || '未指定任務', 14)}`, `lo:${l.start}`]]));
+}
+// 按了「改開始／結束時間」「改任務名稱」之後傳來的文字（10 分鐘內有效）
+async function onEditInput(ctx, t) {
+    const bot = botOf(ctx), e = bot.edit;
+    if (!e) return false;
+    if (!(ctx.now - e.at < 10 * 60000)) { delete touchBot(ctx).edit; return false; }
+    if (/^\//.test(t)) { delete touchBot(ctx).edit; return false; }
+    if (/^(取消|不改|算了)$/.test(t)) { delete touchBot(ctx).edit; ctx.say('好，沒有修改。'); return true; }
+    let clock = null;
+    if (e.f !== 't') {
+        clock = parseClock(t);
+        if (!clock) { delete touchBot(ctx).edit; return false; } // 不是時間：當成一般訊息處理
+    }
+    delete touchBot(ctx).edit;
+    // 時間不合理：保留修改狀態，可以直接再傳一次
+    const retry = msg => { touchBot(ctx).edit = { ...e, at: ctx.now }; ctx.say(`${msg}
+再傳一次時間，或傳「取消」。`); return true; };
+    await ctx.load('timer');
+    const l = await logById(ctx, e.id);
+    if (!l) { ctx.say('找不到這筆記錄了（可能已經改過或刪掉），傳「記錄」再看一次。'); return true; }
+    let next;
+    if (e.f === 't') {
+        const name = t.slice(0, 100);
+        if (name === (l.task || '')) { ctx.say('名稱一樣，沒有修改。'); return true; }
+        next = { ...l, task: name };
+    } else {
+        const day = dateKey(l.start);
+        let start = l.start, end = l.end;
+        if (e.f === 's') {
+            start = localTime(day, clock);
+            if (start >= end) { return retry(`開始時間要早於結束時間 ${hm(end)}。`); }
+        } else {
+            end = localTime(day, clock);
+            if (end <= start) end = localTime(addDays(day, 1), clock); // 跨過午夜
+        }
+        if (end > ctx.now + 60000) { return retry('那個時間還沒到，不能改成未來的時間。'); }
+        if (end - start > DAY_MS) { return retry('一段專注不能超過 24 小時。'); }
+        if (start === l.start && end === l.end) { ctx.say('時間一樣，沒有修改。'); return true; }
+        const around = await logsOfDays(ctx, addDays(dateKey(start), -1), dateKey(end));
+        const clash = around.find(x => x.mode === 'focus' && x.start !== l.start && x.start < end && x.end > start);
+        if (clash) { return retry(`和 ${hm(clash.start)}–${hm(clash.end)} 的專注記錄重疊了。`); }
+        next = retimeLog(l, start, end, timerConf(ctx).focus);
+    }
+    // 同步用「開始時間＋類型」當編號：內容改了要換一個編號，別台裝置才會收下（舊的那筆刪掉）
+    const taken = new Set((await logsOfDays(ctx, dateKey(next.start), dateKey(next.start))).filter(x => x.mode === 'focus').map(x => x.start));
+    if (next.start === l.start) next.start++;
+    while (taken.has(next.start)) next.start++;
+    ctx.delLogs.add(`${l.start}_focus`);
+    ctx.addLog(next);
+    ctx.say(`已修改：${logLine(next)}${e.f !== 't' ? '\n（分鐘和蕃茄已重算；任務條卡片的進度不會跟著改）' : ''}`, [[['看這天的記錄', `lg:${dateKey(next.start)}`]]]);
+    return true;
 }
 
 /* ---------- 記帳（格式和 script.js 的獎勵資料一致） ---------- */
@@ -731,14 +818,14 @@ const HELP = [
     '我是你的蕃茄鐘秘書 🍅 可以這樣跟我說：',
     '・開始：開始專注（沒說做什麼的話，我會建議）',
     '・開始 寫報告：直接開始做「寫報告」',
-    '・暫停／繼續／結束',
+    '・暫停／繼續／結束（正數可以「結束 15:30」「結束 20分鐘前」）',
     '・休息：開始休息',
     '・120 午餐：記一筆支出（記到上次用的帳戶，可以再改）',
     '・任務：看建議和任務庫，點了可以開始或排進任務條',
     '・在看直播：把「看直播」排進任務條（開頭打「在」）',
     '・狀態：現在在做什麼',
     '・今天：今天的成績',
-    '・記錄：今天的逐筆記錄（也可以「記錄 昨天」「記錄 11/25」「記錄 本週」「記錄 上週」）',
+    '・記錄：今天的逐筆記錄（也可以「記錄 昨天」「記錄 11/25」「記錄 本週」「記錄 上週」），可以修改時間、任務名稱或刪除',
     '',
     '網頁關著的時候，我也會在你設定的時段來關心你、提醒計時結束和定時提醒。'
 ].join('\n');
@@ -786,13 +873,18 @@ function startFocus(ctx, task, mini) {
     ctx.say(se.countUp ? `▶ 開始${mini ? '只做 5 分鐘：' : '專注'}${what}，結束時傳「結束」給我。`
         : `▶ 開始${mini ? '只做 5 分鐘：' : '專注'}${what}，${hm(stateOf(ctx).endTime)} 結束。`, statusButtons(ctx));
 }
-function endNow(ctx, endAt) {
+// 剛結束的專注記錄可以馬上改結束時間
+function editEndBtn(ctx) {
+    const l = ctx.newLogs.slice().reverse().find(x => x.mode === 'focus');
+    return l ? [['✏️ 改結束時間', `le:${l.start}:e`]] : [];
+}
+function endNow(ctx, endAt, note = '') {
     const s = stateOf(ctx);
     if (!s.session) { ctx.say(`現在沒有在計時。${statusLine(ctx)}`); return; }
     if (isCountUp(ctx)) {
         const r = finishCountUp(ctx, endAt);
-        const after = r.wasFocus ? `已結束，記下 ${durationText(r.sec)}${r.earned ? `，算 ${r.earned} 顆 🍅` : '（不到一顆蕃茄）'}。今天 ${todayCount(ctx)} 顆 🍅` : '休息結束。';
-        ctx.say(after, r.wasFocus ? [[['☕ 開始休息', 'brk'], ['不休息，繼續', 'skipbrk']]] : [[['▶ 開始做事', 'sg']]]);
+        const after = r.wasFocus ? `${note}已結束，記下 ${durationText(r.sec)}${r.earned ? `，算 ${r.earned} 顆 🍅` : '（不到一顆蕃茄）'}。今天 ${todayCount(ctx)} 顆 🍅` : '休息結束。';
+        ctx.say(after, r.wasFocus ? [[['☕ 開始休息', 'brk'], ['不休息，繼續', 'skipbrk']], editEndBtn(ctx)].filter(x => x.length) : [[['▶ 開始做事', 'sg']]]);
         return;
     }
     // 倒數中途結束：和網頁的「跳過」一樣，這一段記成中斷，切到下一段
@@ -800,8 +892,28 @@ function endNow(ctx, endAt) {
     const sec = liveActiveSec(s, ctx.now);
     advancePhase(ctx, false, 0, ctx.now);
     saveState(ctx);
-    ctx.say(wasFocus ? `已結束（做了 ${durationText(sec)}，倒數沒做完不算蕃茄）。` : '休息結束。',
-        wasFocus ? [[['☕ 開始休息', 'brk'], ['不休息，繼續', 'skipbrk']]] : [[['▶ 開始做事', 'sg']]]);
+    ctx.say(wasFocus ? `${note}已結束（做了 ${durationText(sec)}，倒數沒做完不算蕃茄）。` : '休息結束。',
+        wasFocus ? [[['☕ 開始休息', 'brk'], ['不休息，繼續', 'skipbrk']], editEndBtn(ctx)].filter(x => x.length) : [[['▶ 開始做事', 'sg']]]);
+}
+// 「結束 15:30」「結束 20分鐘前」
+function endAtText(ctx, q) {
+    const s = stateOf(ctx);
+    if (!s.session) { ctx.say(`現在沒有在計時。${statusLine(ctx)}`); return; }
+    let at = null, m = q.match(/^(\d{1,3})\s*分(?:鐘)?前$/);
+    if (m) at = ctx.now - Number(m[1]) * 60000;
+    else {
+        const c = parseClock(q);
+        if (!c) { ctx.say('看不懂這個時間 😅 可以傳「結束 15:30」或「結束 20分鐘前」。'); return; }
+        at = localTime(dateKey(ctx.now), c);
+        if (at > ctx.now) at = localTime(addDays(dateKey(ctx.now), -1), c); // 還沒到：當成昨天（跨午夜的正數）
+    }
+    if (!isCountUp(ctx)) {
+        endNow(ctx, undefined, '倒數不能指定結束時間，先結束到現在；要改的話按下面的「改結束時間」。\n');
+        return;
+    }
+    const from = s.session.segStart || s.session.start;
+    const note = s.isRunning && at < from ? `最多只能改到最後一次開始／繼續的 ${hm(from)}，就算到那時候。\n` : '';
+    endNow(ctx, Math.min(at, ctx.now), note);
 }
 function pauseNow(ctx) {
     const s = stateOf(ctx);
@@ -820,6 +932,7 @@ function startBreak(ctx) {
 }
 
 async function onText(ctx, text) {
+    if (await onEditInput(ctx, text.trim())) return;
     const t = text.trim().replace(/^\/(\w+)(@\w+)?/, (m, c) => ({ help: '說明', status: '狀態', today: '今天', pause: '暫停', resume: '繼續', stop: '結束', focus: '開始', rest: '休息', tasks: '任務', log: '記錄' }[c] || m));
     let m;
     if (/^(說明|幫助|help|\?|？)$/i.test(t)) { ctx.say(HELP, null, { keyboard: true }); return; }
@@ -836,6 +949,7 @@ async function onText(ctx, text) {
     if (/^(繼續|resume)$/i.test(t)) { await prepTimer(ctx); catchUp(ctx); startFocusOrResume(ctx); return; }
     if (/^(暫停|pause)$/i.test(t)) { await prepTimer(ctx); catchUp(ctx); pauseNow(ctx); return; }
     if (/^(結束|停|停止|stop)$/i.test(t)) { await prepTimer(ctx); catchUp(ctx); endNow(ctx); return; }
+    if ((m = t.match(/^結束\s*(.+)$/s))) { await prepTimer(ctx); catchUp(ctx); endAtText(ctx, m[1].trim()); return; }
     if (/^休息$/.test(t)) { await prepTimer(ctx); catchUp(ctx); startBreak(ctx); return; }
     if (/^(狀態|現在|status)$/i.test(t)) { await prepTimer(ctx); catchUp(ctx); ctx.say(statusLine(ctx), statusButtons(ctx)); return; }
     if (/^(任務|任務庫|tasks)$/i.test(t)) { await prepTimer(ctx); await prepSuggest(ctx); showTasks(ctx); return; }
@@ -939,6 +1053,25 @@ async function onButton(ctx, data) {
         if (cmd === 'pa') { await ctx.load('categories'); addToTaskBar(ctx, bot.pick); }
         else startFocus(ctx, bot.pick, cmd === 'pm');
     } else if (cmd === 'pu') undoAdd(ctx);
+    else if (cmd === 'lx') {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(a || '')) { ctx.say('這個按鈕已經過期了，傳「記錄」再看一次。'); return; }
+        await showEditList(ctx, a);
+    } else if (cmd === 'lo' || cmd === 'le' || cmd === 'ld' || cmd === 'ldy') {
+        const l = await logById(ctx, Number(a));
+        if (!l) { ctx.say('找不到這筆記錄了（可能已經改過或刪掉），傳「記錄」再看一次。'); return; }
+        if (cmd === 'lo') {
+            ctx.say(`${logLine(l)}\n要改什麼？`, [[['開始時間', `le:${l.start}:s`], ['結束時間', `le:${l.start}:e`]], [['任務名稱', `le:${l.start}:t`], ['🗑 刪除', `ld:${l.start}`]]]);
+        } else if (cmd === 'le') {
+            if (!['s', 'e', 't'].includes(b)) return;
+            bot.edit = { id: l.start, f: b, at: ctx.now };
+            ctx.say(`${logLine(l)}\n${b === 't' ? '傳新的任務名稱' : `傳新的${b === 's' ? '開始' : '結束'}時間，例如 ${hm(b === 's' ? l.start : l.end)}`}（傳「取消」就不改）`);
+        } else if (cmd === 'ld') {
+            ctx.say(`確定要刪除這筆嗎？\n${logLine(l)}`, [[['確定刪除', `ldy:${l.start}`], ['不要刪', 'ldn']]]);
+        } else {
+            ctx.delLogs.add(`${l.start}_focus`);
+            ctx.say(`已刪除：${logLine(l)}`, [[['看這天的記錄', `lg:${dateKey(l.start)}`]]]);
+        }
+    } else if (cmd === 'ldn') ctx.say('好，沒有刪除。');
     else if (cmd === 'lg' || cmd === 'lw') {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(a || '')) { ctx.say('這個按鈕已經過期了，傳「記錄」再看一次。'); return; }
         if (cmd === 'lg') await showDay(ctx, a); else await showWeek(ctx, weekStart(a));

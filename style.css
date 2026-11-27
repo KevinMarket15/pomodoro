@@ -399,6 +399,7 @@ button.btn-primary { color: var(--accent-color); font-weight: bold; }
 
 /* --- 時間記錄：單筆修改 --- */
 .log-table td.log-task.editable { cursor: text; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
+.log-table td.log-time.editable { cursor: pointer; text-decoration: underline dotted var(--faint); text-underline-offset: 3px; }
 .log-table td.log-del { width: 24px; text-align: center; color: var(--faint); cursor: pointer; }
 .log-table td.log-del:hover { color: #e17055; }
 .log-edit-input { width: 100%; border: none; border-bottom: 1px dashed var(--faint); background: transparent; font: inherit; color: var(--text-color); user-select: text; -webkit-user-select: text; }
@@ -624,9 +625,9 @@ body[data-mode="long"] { --accent-color: var(--long-color); }
 .reminder-note { grid-column: 1 / -1; font-size: 0.68rem; color: var(--faint); }
 
 /* --- 補登：疊在時間記錄視窗上面 --- */
-#manualLogModal { z-index: 210; }
+#manualLogModal, #logEditModal { z-index: 210; }
 #mlQuick { margin: 4px 0 8px; }
-#mlTime, #remTime { width: 9.5em; flex: none; }
+#mlTime, #remTime, #leStart, #leEnd { width: 9.5em; flex: none; }
 
 /* --- 秘書設定：聊天機器人 --- */
 #secUid { word-break: break-all; user-select: all; }

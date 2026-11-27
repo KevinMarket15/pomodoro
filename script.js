@@ -1,5 +1,5 @@
 /* 版本編號：每次更新網站都要改（格式：年.月.日.當天第幾次），設定視窗與使用說明的最下面會顯示 */
-const APP_VERSION = '2026.11.24.4';
+const APP_VERSION = '2026.11.27.1';
 
 /* 登入門檻：這台裝置以前登入並確認過權限，就先把登入畫面收起來（離線也能用）；
  * 之後由 sync.js 確認登入狀態，沒登入或沒權限會再蓋回去。 */
@@ -1648,7 +1648,12 @@ function renderLogModal() {
         const r = logRow(l);
         const tr = body.insertRow();
         if (r.status === '中斷') tr.className = 'interrupted';
-        tr.insertCell().textContent = `${r.start}–${r.end}`;
+        const timeCell = tr.insertCell();
+        timeCell.textContent = `${r.start}–${r.end}`;
+        if (l.mode === 'focus') { // 專注的時間可以點一下修改
+            timeCell.className = 'log-time editable'; timeCell.title = '點一下修改時間';
+            timeCell.onclick = () => openLogEdit(l);
+        }
         tr.insertCell().textContent = r.type;
         const taskCell = tr.insertCell(); taskCell.className = 'log-task';
         const taskText = document.createElement('span'); taskText.textContent = r.task; taskCell.appendChild(taskText);
@@ -1680,6 +1685,75 @@ function editLogTask(l, textEl) {
         saveLogs(logs);
         rerenderKey(STORAGE_KEY_LOG);
     }, l.task || '');
+}
+
+/* 修改一筆專注記錄的時間與任務（規則和 bot/worker.js 的 retimeLog、onEditInput 一樣） */
+// 改了開始／結束時間：中間暫停的時間保留，蕃茄照正數規則重算（每滿一段專注時長一顆）
+function retimeLog(l, start, end) {
+    const span = Math.round((end - start) / 1000);
+    const actualSec = Math.max(0, Math.min(span, Math.round((l.actualSec || 0) + (l.start - start) / 1000 + (end - l.end) / 1000)));
+    const out = { ...l, start, end, actualSec, completed: true, countUp: true, pomodoros: manualPomodoros(actualSec) };
+    if (!l.countUp) out.plannedSec = actualSec;
+    return out;
+}
+let logEditTarget = null;
+function logEditTimes() {
+    const l = logEditTarget, day = dateKey(l.start);
+    const s = cleanTime(document.getElementById('leStart').value), e = cleanTime(document.getElementById('leEnd').value);
+    if (!s || !e) return null;
+    const start = new Date(`${day}T${s}`).getTime();
+    let end = new Date(`${day}T${e}`).getTime();
+    if (end <= start) end = new Date(`${addDays(day, 1)}T${e}`).getTime(); // 跨過午夜
+    // 時間沒動（只看到分鐘）就保留原本的秒數
+    return { start: s === clockText(l.start) ? l.start : start, end: e === clockText(l.end) ? l.end : end };
+}
+function updateLogEditNote() {
+    const t = logEditTarget && logEditTimes(), note = document.getElementById('leNote');
+    if (!t) { note.textContent = ''; return; }
+    if (t.start === logEditTarget.start && t.end === logEditTarget.end) { note.textContent = ''; return; }
+    const n = retimeLog(logEditTarget, t.start, t.end);
+    note.textContent = `${minutesText(n.actualSec)} 分鐘${n.pomodoros ? `，算 ${n.pomodoros} 顆蕃茄` : '，不算蕃茄'}`;
+}
+function openLogEdit(l) {
+    fillTaskDatalist();
+    logEditTarget = l;
+    document.getElementById('leTitle').textContent = `修改記錄（${dateKey(l.start)} ${weekdayText(dateKey(l.start))}）`;
+    document.getElementById('leTask').value = l.task || '';
+    document.getElementById('leStart').value = clockText(l.start);
+    document.getElementById('leEnd').value = clockText(l.end);
+    document.getElementById('leMsg').textContent = '';
+    updateLogEditNote();
+    toggleModal(true, 'logEditModal');
+}
+function saveLogEdit() {
+    const msg = document.getElementById('leMsg'), l = logEditTarget;
+    if (!l) return;
+    const t = logEditTimes();
+    if (!t) { msg.textContent = '請填開始和結束時間'; return; }
+    const task = cleanText(document.getElementById('leTask').value.trim().slice(0, 100));
+    const logs = loadLogs();
+    const target = logs.find(x => sameLog(x, l));
+    if (!target) { msg.textContent = '找不到這筆記錄了（可能在別台裝置改過或刪掉）'; return; }
+    const timeChanged = t.start !== target.start || t.end !== target.end;
+    if (!timeChanged && task === (target.task || '')) { toggleModal(false, 'logEditModal'); return; }
+    let next = { ...target, task };
+    if (timeChanged) {
+        if (t.start >= t.end) { msg.textContent = '開始時間要早於結束時間'; return; }
+        if (t.end > Date.now() + 60000) { msg.textContent = '結束時間還沒到，不能改成未來的時間'; return; }
+        if (t.end - t.start > 24 * 3600 * 1000) { msg.textContent = '一段專注不能超過 24 小時'; return; }
+        const clash = logs.find(x => x !== target && x.mode === 'focus' && x.start < t.end && x.end > t.start);
+        if (clash) { msg.textContent = `和 ${clockText(clash.start)}–${clockText(clash.end)} 的專注記錄重疊了，請調整時間`; return; }
+        next = retimeLog(next, t.start, t.end);
+    }
+    // 同步用「開始時間＋類型」當編號：內容改了要換一個編號，別台裝置才會收下（舊的那筆會被刪掉）
+    if (next.start === target.start) next.start++;
+    while (logs.some(x => x !== target && x.mode === next.mode && x.start === next.start)) next.start++;
+    logs.splice(logs.indexOf(target), 1, next);
+    saveLogs(logs);
+    playTone('click');
+    toggleModal(false, 'logEditModal');
+    rerenderKey(STORAGE_KEY_LOG);
+    showToast(timeChanged ? `已修改：${clockText(next.start)}–${clockText(next.end)}，${minutesText(next.actualSec)} 分鐘${next.pomodoros ? `（${next.pomodoros} 🍅）` : ''}` : '已修改任務名稱', null, null, 4000);
 }
 
 function deleteLog(l) {
@@ -3775,6 +3849,11 @@ function saveManualLog() {
     showToast(`已補登 ${min} 分鐘${pomodoros ? `（${pomodoros} 🍅）` : ''}${credited}`, null, null, 4000);
 }
 document.getElementById('mlSave').addEventListener('click', saveManualLog);
+document.getElementById('leSave').addEventListener('click', saveLogEdit);
+['leStart', 'leEnd'].forEach(id => document.getElementById(id).addEventListener('input', updateLogEditNote));
+['leStart', 'leEnd', 'leTask'].forEach(id => document.getElementById(id).addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); saveLogEdit(); }
+}));
 document.getElementById('mlMin').addEventListener('input', updateManualNote);
 document.querySelectorAll('#mlQuick .seg-btn').forEach(b => b.addEventListener('click', () => {
     playTone('click');
