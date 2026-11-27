@@ -493,6 +493,48 @@ function showCategory(ctx, i) {
     rows.push([['‹ 回到任務', 'tasks']]);
     ctx.say(`📚 ${c.title}${c.tasks.length > 40 ? `（只列前 40 個，共 ${c.tasks.length} 個）` : ''}`, rows);
 }
+/* ---------- 任務庫：新增、刪除（格式和 script.js 的 saveCategories 一致） ---------- */
+function rawCategories(ctx) { const c = ctx.get('categories'); return Array.isArray(c) ? c : []; }
+function askLibraryCat(ctx, name) {
+    const cats = categoriesOf(ctx);
+    if (!name) return;
+    if (!cats.length) { ctx.say('任務庫還沒有類別，先到網頁新增一個類別。'); return; }
+    const bot = touchBot(ctx);
+    bot.libName = name;
+    const rows = [], btns = cats.slice(0, 30).map((c, i) => [`📚 ${clip(c.title, 12)}`, `ac:${i}`]);
+    for (let i = 0; i < btns.length; i += 2) rows.push(btns.slice(i, i + 2));
+    ctx.say(`要把「${name}」加進哪個類別？`, rows);
+}
+function addToLibrary(ctx, i, name) {
+    const cats = categoriesOf(ctx), c = cats[i];
+    if (!c || !name) { ctx.say('任務庫已經變了，再傳一次試試。'); return; }
+    const bot = touchBot(ctx);
+    bot.pick = name; // 「▶ 現在開始」「排進任務條」用
+    if (c.tasks.includes(name)) {
+        ctx.say(`「${c.title}」裡已經有「${name}」了。`, [[['▶ 現在開始', 'pg'], ['排進任務條', 'pa']]]);
+        return;
+    }
+    c.tasks.push(name);
+    if (!c.meta || typeof c.meta !== 'object') c.meta = {};
+    ctx.set('categories', rawCategories(ctx));
+    bot.libAdd = { cat: c.title, name };
+    ctx.say(`已把「${name}」加進「${c.title}」（共 ${c.tasks.length} 個）。`, [[['▶ 現在開始', 'pg'], ['排進任務條', 'pa']], [['取消', 'lu']]]);
+}
+// 找到類別裡的任務（用名稱找，避免按鈕過期時刪錯）
+function findLibTask(ctx, title, name) {
+    const c = categoriesOf(ctx).find(x => x.title === title);
+    return c && c.tasks.includes(name) ? c : null;
+}
+function removeFromLibrary(ctx, title, name) {
+    const c = findLibTask(ctx, title, name);
+    if (!c) return null;
+    const at = c.tasks.indexOf(name), meta = c.meta && c.meta[name];
+    c.tasks.splice(at, 1);
+    if (c.meta) delete c.meta[name];
+    ctx.set('categories', rawCategories(ctx));
+    return { cat: title, name, at, meta: meta || null };
+}
+
 // 排進任務條：和網頁一樣，還沒完成的最後一張剛好同名就多排幾顆，否則排在已完成的前面
 function addToTaskBar(ctx, name) {
     const list = scheduleOf(ctx), info = taskInfo(ctx, name);
@@ -823,6 +865,7 @@ const HELP = [
     '・120 午餐：記一筆支出（記到上次用的帳戶，可以再改）',
     '・任務：看建議和任務庫，點了可以開始或排進任務條',
     '・在看直播：把「看直播」排進任務條（開頭打「在」）',
+    '・待辦 買牛奶：加進任務庫的「待辦」類別（開頭打類別名稱）；或傳「加 買牛奶」再選類別',
     '・狀態：現在在做什麼',
     '・今天：今天的成績',
     '・記錄：今天的逐筆記錄（也可以「記錄 昨天」「記錄 11/25」「記錄 本週」「記錄 上週」），可以修改時間、任務名稱或刪除',
@@ -972,6 +1015,18 @@ async function onText(ctx, text) {
         await showDay(ctx, date);
         return;
     }
+    // 「加 買牛奶」：選要加進任務庫的哪個類別
+    if ((m = t.match(/^(?:加|新增)\s+(.+)$/s))) {
+        await ctx.load('categories');
+        askLibraryCat(ctx, m[1].trim().slice(0, 100));
+        return;
+    }
+    // 「待辦 買牛奶」：開頭是類別名稱，就加進那個類別（指令優先，所以放在指令後面判斷）
+    await ctx.load('categories');
+    const cat = categoriesOf(ctx).map((c, i) => ({ c, i })).filter(x => x.c.title && t.startsWith(x.c.title))
+        .sort((x, y) => y.c.title.length - x.c.title.length)
+        .find(x => /^\s+\S/.test(t.slice(x.c.title.length)));
+    if (cat) { addToLibrary(ctx, cat.i, t.slice(cat.c.title.length).trim().slice(0, 100)); return; }
     // 「在看直播」「正在看直播」：把「看直播」排進任務條（開頭的「在」就是記號，所以比記帳先判斷）
     if ((m = t.match(/^(?:正在|在)\s*(.+)$/s))) {
         await prepTimer(ctx); await ctx.load('categories'); catchUp(ctx);
@@ -1047,12 +1102,44 @@ async function onButton(ctx, data) {
         const name = cmd === 'pk' ? (bot.cands || [])[Number(a)] : c && c.tasks[Number(b)];
         if (name == null) { ctx.say('任務庫已經變了，按「任務」再選一次。'); return; }
         bot.pick = name;
-        ctx.say(`「${name}」要怎麼做？`, [[['▶ 開始', 'pg'], ['只做 5 分鐘', 'pm']], [['排進任務條', 'pa']]]);
+        bot.pickCat = cmd === 'pt' ? c.title : null;
+        ctx.say(`「${name}」要怎麼做？`, [[['▶ 開始', 'pg'], ['只做 5 分鐘', 'pm']], [['排進任務條', 'pa'], ...(cmd === 'pt' ? [['🗑 從任務庫刪除', 'ldel']] : [])]]);
     } else if (cmd === 'pg' || cmd === 'pm' || cmd === 'pa') {
         if (!bot.pick) { ctx.say('這個按鈕已經過期了，按「任務」再選一次。'); return; }
         if (cmd === 'pa') { await ctx.load('categories'); addToTaskBar(ctx, bot.pick); }
         else startFocus(ctx, bot.pick, cmd === 'pm');
     } else if (cmd === 'pu') undoAdd(ctx);
+    else if (cmd === 'ac') {
+        await ctx.load('categories');
+        if (!bot.libName) { ctx.say('這個按鈕已經過期了，再傳一次「加 任務名稱」。'); return; }
+        const name = bot.libName;
+        delete bot.libName;
+        addToLibrary(ctx, Number(a), name);
+    } else if (cmd === 'lu') { // 取消剛剛加進任務庫的
+        await ctx.load('categories');
+        const add = bot.libAdd;
+        if (!add || !removeFromLibrary(ctx, add.cat, add.name)) { ctx.say('這個按鈕已經過期了，要改的話到網頁上改。'); return; }
+        delete bot.libAdd;
+        ctx.say(`已取消，「${add.name}」從「${add.cat}」拿掉了。`);
+    } else if (cmd === 'ldel') {
+        await ctx.load('categories');
+        const del = bot.pick && bot.pickCat ? removeFromLibrary(ctx, bot.pickCat, bot.pick) : null;
+        if (!del) { ctx.say('找不到這個任務了（可能已經刪掉），按「任務」再看一次。'); return; }
+        bot.libDel = del;
+        bot.pickCat = null;
+        ctx.say(`已把「${del.name}」從「${del.cat}」刪除。`, [[['復原', 'lre']]]);
+    } else if (cmd === 'lre') { // 復原剛剛刪掉的
+        await ctx.load('categories');
+        const del = bot.libDel, c = del && categoriesOf(ctx).find(x => x.title === del.cat);
+        if (!c) { ctx.say('這個按鈕已經過期了，要改的話到網頁上改。'); return; }
+        if (!c.tasks.includes(del.name)) {
+            c.tasks.splice(Math.min(del.at, c.tasks.length), 0, del.name);
+            if (del.meta) { if (!c.meta || typeof c.meta !== 'object') c.meta = {}; c.meta[del.name] = del.meta; }
+            ctx.set('categories', rawCategories(ctx));
+        }
+        delete bot.libDel;
+        ctx.say(`已復原「${del.name}」。`);
+    }
     else if (cmd === 'lx') {
         if (!/^\d{4}-\d{2}-\d{2}$/.test(a || '')) { ctx.say('這個按鈕已經過期了，傳「記錄」再看一次。'); return; }
         await showEditList(ctx, a);
